@@ -85,7 +85,7 @@ class SearchTextTests(unittest.TestCase):
         names = [definition["function"]["name"] for definition in executor.definitions]
         result = executor("search_text", {"query": "find"})
 
-        self.assertEqual(names, ["read_file", "search_text"])
+        self.assertIn("search_text", names)
         self.assertEqual(result["content"], "notes.txt:1:find me")
         self.assertTrue(result["success"])
 

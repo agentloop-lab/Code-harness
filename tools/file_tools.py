@@ -1,4 +1,4 @@
-"""Read-only file tools."""
+"""File operation tools."""
 
 from __future__ import annotations
 
@@ -50,6 +50,22 @@ SEARCH_TEXT_DEFINITION = {
     },
 }
 
+WRITE_FILE_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "write_file",
+        "description": "Create a new UTF-8 text file inside the workspace.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "content": {"type": "string"},
+            },
+            "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+    },
+}
 
 def read_file(
     workspace: str | Path,
@@ -164,6 +180,40 @@ def search_text(
 
     content = "\n".join(matches) if matches else "No matches found."
     return ToolResult(True, content)
+
+
+def write_file(workspace: str | Path, path: str, content: str) -> ToolResult:
+    """Create a UTF-8 file without overwriting an existing path."""
+
+    if not isinstance(path, str) or not path:
+        return ToolResult(False, "path must be a non-empty string.", "InvalidArguments")
+    if not isinstance(content, str):
+        return ToolResult(False, "content must be a string.", "InvalidArguments")
+
+    root = Path(workspace).resolve()
+    try:
+        target = resolve_workspace_path(root, path)
+    except WorkspacePathError:
+        return ToolResult(
+            False,
+            "Path is outside the workspace.",
+            "PathOutsideWorkspace",
+        )
+
+    if target.exists():
+        return ToolResult(False, f"Path already exists: {path}", "FileAlreadyExists")
+
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("x", encoding="utf-8") as destination:
+            destination.write(content)
+    except FileExistsError:
+        return ToolResult(False, f"Path already exists: {path}", "FileAlreadyExists")
+    except OSError:
+        return ToolResult(False, f"Could not create file: {path}", "WriteError")
+
+    relative_path = target.relative_to(root).as_posix()
+    return ToolResult(True, f"Created file: {relative_path}")
 
 
 def _valid_line_range(start_line: int | None, end_line: int | None) -> bool:
