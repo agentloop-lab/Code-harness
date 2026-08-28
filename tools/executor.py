@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from tools.base import ToolResult
+from tools.command_tools import RUN_COMMAND_DEFINITION, run_command
 from tools.file_tools import (
     EDIT_FILE_DEFINITION,
     READ_FILE_DEFINITION,
@@ -31,6 +32,7 @@ class ToolExecutor:
             SEARCH_TEXT_DEFINITION,
             WRITE_FILE_DEFINITION,
             EDIT_FILE_DEFINITION,
+            RUN_COMMAND_DEFINITION,
         ]
 
     def __call__(self, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -42,6 +44,8 @@ class ToolExecutor:
             result = write_file(self.workspace, **arguments)
         elif name == "edit_file":
             result = edit_file(self.workspace, **arguments)
+        elif name == "run_command":
+            result = run_command(self.workspace, **arguments)
         else:
             result = ToolResult(False, f"Unknown tool: {name}", "UnknownTool")
         return result.to_dict()
