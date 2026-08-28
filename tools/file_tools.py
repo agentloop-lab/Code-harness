@@ -5,6 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 from tools.base import ToolResult
+from tools.paths import (
+    WorkspacePathError,
+    is_within_workspace,
+    resolve_workspace_path,
+)
 
 
 DEFAULT_MAX_CHARS = 20_000
@@ -28,6 +33,23 @@ READ_FILE_DEFINITION = {
     },
 }
 
+SEARCH_TEXT_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "search_text",
+        "description": "Search for exact text in UTF-8 files inside the workspace.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string"},
+                "path": {"type": "string", "default": "."},
+            },
+            "required": ["query"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 
 def read_file(
     workspace: str | Path,
@@ -45,13 +67,9 @@ def read_file(
     if not isinstance(max_chars, int) or isinstance(max_chars, bool) or max_chars < 1:
         return ToolResult(False, "max_chars must be a positive integer.", "InvalidArguments")
 
-    root = Path(workspace).resolve()
-    requested = Path(path)
-    target = requested.resolve() if requested.is_absolute() else (root / requested).resolve()
-
     try:
-        target.relative_to(root)
-    except ValueError:
+        target = resolve_workspace_path(workspace, path)
+    except WorkspacePathError:
         return ToolResult(False, "Path is outside the workspace.", "PathOutsideWorkspace")
 
     if not target.exists():
@@ -78,6 +96,73 @@ def read_file(
         else:
             content = content[:max_chars]
 
+    return ToolResult(True, content)
+
+
+def search_text(
+    workspace: str | Path,
+    query: str,
+    path: str = ".",
+    max_results: int = 100,
+) -> ToolResult:
+    """Search UTF-8 files for an exact, case-sensitive string."""
+
+    if not isinstance(query, str) or not query:
+        return ToolResult(
+            False,
+            "query must be a non-empty string.",
+            "InvalidArguments",
+        )
+    if not isinstance(path, str) or not path:
+        return ToolResult(False, "path must be a non-empty string.", "InvalidArguments")
+    if (
+        not isinstance(max_results, int)
+        or isinstance(max_results, bool)
+        or max_results < 1
+    ):
+        return ToolResult(
+            False,
+            "max_results must be a positive integer.",
+            "InvalidArguments",
+        )
+
+    root = Path(workspace).resolve()
+    try:
+        target = resolve_workspace_path(root, path)
+    except WorkspacePathError:
+        return ToolResult(
+            False,
+            "Path is outside the workspace.",
+            "PathOutsideWorkspace",
+        )
+
+    if not target.exists():
+        return ToolResult(False, f"Path does not exist: {path}", "FileNotFound")
+
+    try:
+        files = [target] if target.is_file() else sorted(target.rglob("*"))
+    except OSError:
+        return ToolResult(False, f"Could not search path: {path}", "SearchError")
+
+    matches: list[str] = []
+    for candidate in files:
+        if not candidate.is_file() or not is_within_workspace(root, candidate):
+            continue
+        try:
+            with candidate.open("r", encoding="utf-8") as source:
+                for line_number, line in enumerate(source, start=1):
+                    if query not in line:
+                        continue
+                    relative_path = candidate.resolve().relative_to(root).as_posix()
+                    matches.append(
+                        f"{relative_path}:{line_number}:{line.rstrip()}"
+                    )
+                    if len(matches) == max_results:
+                        return ToolResult(True, "\n".join(matches))
+        except (OSError, UnicodeDecodeError):
+            continue
+
+    content = "\n".join(matches) if matches else "No matches found."
     return ToolResult(True, content)
 
 
