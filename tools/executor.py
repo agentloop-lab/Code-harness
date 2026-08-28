@@ -7,9 +7,11 @@ from typing import Any, Mapping
 
 from tools.base import ToolResult
 from tools.file_tools import (
+    EDIT_FILE_DEFINITION,
     READ_FILE_DEFINITION,
     SEARCH_TEXT_DEFINITION,
     WRITE_FILE_DEFINITION,
+    edit_file,
     read_file,
     search_text,
     write_file,
@@ -28,6 +30,7 @@ class ToolExecutor:
             READ_FILE_DEFINITION,
             SEARCH_TEXT_DEFINITION,
             WRITE_FILE_DEFINITION,
+            EDIT_FILE_DEFINITION,
         ]
 
     def __call__(self, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
@@ -37,6 +40,8 @@ class ToolExecutor:
             result = search_text(self.workspace, **arguments)
         elif name == "write_file":
             result = write_file(self.workspace, **arguments)
+        elif name == "edit_file":
+            result = edit_file(self.workspace, **arguments)
         else:
             result = ToolResult(False, f"Unknown tool: {name}", "UnknownTool")
         return result.to_dict()

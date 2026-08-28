@@ -3,20 +3,24 @@
 from tools.base import ToolResult
 from tools.executor import ToolExecutor
 from tools.file_tools import (
+    EDIT_FILE_DEFINITION,
     READ_FILE_DEFINITION,
     SEARCH_TEXT_DEFINITION,
     WRITE_FILE_DEFINITION,
+    edit_file,
     read_file,
     search_text,
     write_file,
 )
 
 __all__ = [
+    "EDIT_FILE_DEFINITION",
     "READ_FILE_DEFINITION",
     "SEARCH_TEXT_DEFINITION",
     "WRITE_FILE_DEFINITION",
     "ToolExecutor",
     "ToolResult",
+    "edit_file",
     "read_file",
     "search_text",
     "write_file",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 
 from tools.base import ToolResult
@@ -62,6 +64,24 @@ WRITE_FILE_DEFINITION = {
                 "content": {"type": "string"},
             },
             "required": ["path", "content"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+EDIT_FILE_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "edit_file",
+        "description": "Replace one unique text block in an existing UTF-8 file.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string"},
+                "old_text": {"type": "string"},
+                "new_text": {"type": "string"},
+            },
+            "required": ["path", "old_text", "new_text"],
             "additionalProperties": False,
         },
     },
@@ -214,6 +234,81 @@ def write_file(workspace: str | Path, path: str, content: str) -> ToolResult:
 
     relative_path = target.relative_to(root).as_posix()
     return ToolResult(True, f"Created file: {relative_path}")
+
+
+def edit_file(
+    workspace: str | Path,
+    path: str,
+    old_text: str,
+    new_text: str,
+) -> ToolResult:
+    """Replace one unique text block in an existing UTF-8 file."""
+
+    if not isinstance(path, str) or not path:
+        return ToolResult(False, "path must be a non-empty string.", "InvalidArguments")
+    if not isinstance(old_text, str) or not old_text:
+        return ToolResult(
+            False,
+            "old_text must be a non-empty string.",
+            "InvalidArguments",
+        )
+    if not isinstance(new_text, str):
+        return ToolResult(False, "new_text must be a string.", "InvalidArguments")
+
+    root = Path(workspace).resolve()
+    try:
+        target = resolve_workspace_path(root, path)
+    except WorkspacePathError:
+        return ToolResult(
+            False,
+            "Path is outside the workspace.",
+            "PathOutsideWorkspace",
+        )
+
+    if not target.exists():
+        return ToolResult(False, f"File does not exist: {path}", "FileNotFound")
+    if not target.is_file():
+        return ToolResult(False, f"Path is not a file: {path}", "NotAFile")
+
+    try:
+        content = target.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        return ToolResult(False, f"File is not valid UTF-8: {path}", "DecodeError")
+    except OSError:
+        return ToolResult(False, f"Could not read file: {path}", "ReadError")
+
+    match_index = content.find(old_text)
+    if match_index == -1:
+        return ToolResult(False, "old_text was not found.", "TextNotFound")
+    if content.find(old_text, match_index + 1) != -1:
+        return ToolResult(False, "old_text is not unique.", "TextNotUnique")
+
+    updated_content = (
+        content[:match_index]
+        + new_text
+        + content[match_index + len(old_text) :]
+    )
+    temporary_path: str | None = None
+    try:
+        descriptor, temporary_path = tempfile.mkstemp(
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            text=True,
+        )
+        with os.fdopen(descriptor, "w", encoding="utf-8") as temporary_file:
+            temporary_file.write(updated_content)
+        os.replace(temporary_path, target)
+    except OSError:
+        if temporary_path is not None:
+            try:
+                Path(temporary_path).unlink(missing_ok=True)
+            except OSError:
+                pass
+        return ToolResult(False, f"Could not edit file: {path}", "EditError")
+
+    relative_path = target.relative_to(root).as_posix()
+    return ToolResult(True, f"Updated file: {relative_path}")
 
 
 def _valid_line_range(start_line: int | None, end_line: int | None) -> bool:
