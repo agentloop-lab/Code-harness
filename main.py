@@ -136,7 +136,7 @@ def _user_error_message(error: Exception) -> str:
 
     current: BaseException | None = error
     while current is not None:
-        if isinstance(current, ModelClientError):
+        if isinstance(current, (ContextError, ModelClientError)):
             return str(current)
         current = current.__cause__
     return str(error)
@@ -161,7 +161,13 @@ def run_cli(
 
         model_client = ModelClient()
         session_store = SessionStore(DEFAULT_SESSION_DIRECTORY)
-        context_manager = ContextManager(DEFAULT_RESULT_DIRECTORY)
+        context_manager = ContextManager(
+            DEFAULT_RESULT_DIRECTORY,
+            on_auto_compaction=lambda before, after: print(
+                f"[context] Auto-compacted: {before:,} -> {after:,} characters.",
+                file=output,
+            ),
+        )
         session = session_store.create()
         loop = _create_loop(
             model_client,

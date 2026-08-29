@@ -74,6 +74,39 @@ class ContextManagerTests(unittest.TestCase):
         self.assertIn("recent output", context[5]["content"])
         self.assertIn("old output", messages[1]["content"])
 
+    def test_automatically_compacts_context_over_budget(self) -> None:
+        events = []
+        model_client = Mock()
+        model_client.chat.return_value = summary_response("Short summary")
+        manager = ContextManager(
+            Path("results"),
+            context_budget=100,
+            on_auto_compaction=lambda before, after: events.append((before, after)),
+        )
+        messages = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "Old task"},
+            {"role": "assistant", "content": "A" * 200},
+            {"role": "user", "content": "Current task"},
+        ]
+
+        context, was_compacted = manager.prepare_context(messages, model_client)
+
+        self.assertTrue(was_compacted)
+        self.assertIn("Short summary", context[0]["content"])
+        self.assertEqual(context[-1], {"role": "user", "content": "Current task"})
+        self.assertEqual(len(events), 1)
+        self.assertLess(events[0][1], events[0][0])
+
+        model_client.reset_mock()
+        context, was_compacted = manager.prepare_context(
+            [{"role": "user", "content": "small"}],
+            model_client,
+        )
+        self.assertFalse(was_compacted)
+        self.assertEqual(context[0]["content"], "small")
+        model_client.chat.assert_not_called()
+
     def test_compacts_history_into_one_summary(self) -> None:
         model_client = Mock()
         model_client.chat.return_value = summary_response("- Progress: fixed app.py")

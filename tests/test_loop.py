@@ -136,7 +136,9 @@ class AgentLoopTests(unittest.TestCase):
         ]
         self.tool_executor.return_value = "large output"
         context_manager = Mock()
-        context_manager.build_context.side_effect = lambda messages: list(messages)
+        context_manager.prepare_context.side_effect = (
+            lambda messages, model_client: (list(messages), False)
+        )
         context_manager.process_tool_result.return_value = "stored preview"
         loop = AgentLoop(
             self.model_client,
@@ -147,8 +149,29 @@ class AgentLoopTests(unittest.TestCase):
         loop.run("Inspect a.py")
 
         context_manager.process_tool_result.assert_called_once_with("large output")
-        self.assertEqual(context_manager.build_context.call_count, 2)
+        self.assertEqual(context_manager.prepare_context.call_count, 2)
         self.assertEqual(loop.messages[2]["content"], "stored preview")
+
+    def test_replaces_history_after_automatic_compaction(self) -> None:
+        self.model_client.chat.return_value = model_response(content="Done")
+        context_manager = Mock()
+        summary = [{"role": "system", "content": "Conversation summary"}]
+        context_manager.prepare_context.return_value = (summary, True)
+        loop = AgentLoop(
+            self.model_client,
+            history=[{"role": "user", "content": "Old task"}],
+            context_manager=context_manager,
+        )
+
+        loop.run("Continue")
+
+        self.assertEqual(
+            loop.messages,
+            [
+                {"role": "system", "content": "Conversation summary"},
+                {"role": "assistant", "content": "Done"},
+            ],
+        )
 
     def test_returns_invalid_arguments_to_model(self) -> None:
         self.model_client.chat.side_effect = [

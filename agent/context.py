@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -14,6 +14,7 @@ from agent.model import ModelClient
 DEFAULT_TOOL_RESULT_LIMIT = 12_000
 DEFAULT_PREVIEW_SIZE = 2_000
 DEFAULT_RECENT_TOOL_RESULTS = 6
+DEFAULT_CONTEXT_BUDGET = 60_000
 PRUNABLE_TOOL_NAMES = {"list_files", "read_file", "search_text", "run_command"}
 SUMMARY_MARKER = "\n\nPrevious conversation summary:\n"
 COMPACTION_PROMPT = """Summarize the coding-agent conversation for future turns.
@@ -42,11 +43,15 @@ class ContextManager:
         tool_result_limit: int = DEFAULT_TOOL_RESULT_LIMIT,
         preview_size: int = DEFAULT_PREVIEW_SIZE,
         recent_tool_results: int = DEFAULT_RECENT_TOOL_RESULTS,
+        context_budget: int = DEFAULT_CONTEXT_BUDGET,
+        on_auto_compaction: Callable[[int, int], None] | None = None,
     ) -> None:
         self.results_directory = results_directory
         self.tool_result_limit = tool_result_limit
         self.preview_size = preview_size
         self.recent_tool_results = recent_tool_results
+        self.context_budget = context_budget
+        self.on_auto_compaction = on_auto_compaction
 
     def process_tool_result(self, content: str) -> str:
         if len(content) <= self.tool_result_limit:
@@ -97,6 +102,40 @@ class ContextManager:
                 f"[Earlier {tool_name} result omitted to reduce context.]"
             )
         return context
+
+    def prepare_context(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+        model_client: ModelClient,
+    ) -> tuple[list[dict[str, Any]], bool]:
+        context = self.build_context(messages)
+        before = self.estimate_size(context)
+        if before <= self.context_budget:
+            return context, False
+
+        recent_start = next(
+            (
+                index
+                for index in range(len(context) - 1, -1, -1)
+                if context[index].get("role") == "user"
+            ),
+            None,
+        )
+        if recent_start is None:
+            return context, False
+
+        older_messages = context[:recent_start]
+        if not any(message.get("role") != "system" for message in older_messages):
+            return context, False
+
+        compacted = self.compact_history(older_messages, model_client)
+        compacted.extend(context[recent_start:])
+        after = self.estimate_size(compacted)
+        if after >= before:
+            return context, False
+        if self.on_auto_compaction is not None:
+            self.on_auto_compaction(before, after)
+        return compacted, True
 
     def compact_history(
         self,

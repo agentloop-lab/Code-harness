@@ -67,12 +67,18 @@ class AgentLoop:
             self.state.current_step += 1
             try:
                 context = (
-                    self.context_manager.build_context(self.state.messages)
+                    self.context_manager.prepare_context(
+                        self.state.messages,
+                        self.model_client,
+                    )
                     if self.context_manager is not None
-                    else list(self.state.messages)
+                    else (list(self.state.messages), False)
                 )
+                request_messages, was_compacted = context
+                if was_compacted:
+                    self.state.messages[:] = request_messages
                 response = self.model_client.chat(
-                    context, self.tools
+                    request_messages, self.tools
                 )
                 message = self._response_message(response)
                 assistant_message, tool_calls = self._assistant_message(message)
