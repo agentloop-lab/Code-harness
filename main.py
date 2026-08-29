@@ -6,11 +6,13 @@ import argparse
 import json
 import sys
 from collections.abc import Callable, Mapping, Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
 from agent.loop import AgentLoop, AgentLoopError
 from agent.model import ModelClient, ModelClientError, ModelConfigError
+from agent.session import Session, SessionError, SessionStore
 from tools import ToolExecutor
 
 
@@ -24,6 +26,8 @@ SYSTEM_PROMPT = (
     "Do not use python3 or another Python executable. Briefly summarize the "
     "result in your final answer."
 )
+DEFAULT_SESSION_DIRECTORY = Path(".agent/sessions")
+EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 
 
 class ConsoleToolExecutor:
@@ -122,6 +126,13 @@ def _parser() -> argparse.ArgumentParser:
         default=10,
         help="Maximum number of model steps (default: 10).",
     )
+    parser.add_argument(
+        "--resume",
+        nargs="?",
+        const="latest",
+        metavar="SESSION_ID",
+        help="Resume a saved session (default: latest session).",
+    )
     return parser
 
 
@@ -145,12 +156,7 @@ def run_cli(
     """Run one coding task from command-line arguments or a prompt."""
 
     args = _parser().parse_args(argv)
-    task = " ".join(args.task).strip()
-    if not task:
-        task = input_fn("Task> ").strip()
-    if not task:
-        print("Error: task cannot be empty.", file=output)
-        return 2
+    initial_task = " ".join(args.task).strip()
 
     workspace = args.workspace.resolve()
     try:
@@ -158,31 +164,151 @@ def run_cli(
         if not workspace.is_dir():
             raise OSError("workspace is not a directory")
 
-        executor = ToolExecutor(workspace)
-        visible_executor = ConsoleToolExecutor(executor, output)
         model_client = ModelClient()
-        loop = AgentLoop(
-            model_client,
-            tools=executor.definitions,
-            tool_executor=visible_executor,
-            max_steps=args.max_steps,
+        session_store = SessionStore(DEFAULT_SESSION_DIRECTORY)
+        session = (
+            session_store.load(args.resume)
+            if args.resume
+            else session_store.create()
         )
+        loop = _create_loop(model_client, workspace, args.max_steps, session, output)
 
         print("Code Harness", file=output)
         print("=" * 60, file=output)
         print(f"Model:     {model_client.config.model_name}", file=output)
         print(f"Workspace: {workspace}", file=output)
-        print(f"Task:      {task}", file=output)
+        print(f"Session:   {session.session_id}", file=output)
+        if args.resume:
+            print(f"History:   {session.turn_count} previous turn(s)", file=output)
         print("-" * 60, file=output)
-        answer = loop.run(task, system_prompt=SYSTEM_PROMPT)
-        print("-" * 60, file=output)
-        print("Result", file=output)
-        print(answer or "(No final response.)", file=output)
-        print("=" * 60, file=output)
-        return 0
-    except (AgentLoopError, ModelClientError, ModelConfigError, OSError, ValueError) as exc:
+
+        if initial_task:
+            return _run_turn(initial_task, loop, session, session_store, output)
+
+        print("Commands: /resume  /exit", file=output)
+        while True:
+            try:
+                task = input_fn("Task> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nSession saved.", file=output)
+                return 0
+            if task.casefold() in EXIT_COMMANDS:
+                print("Session saved.", file=output)
+                return 0
+            if task.casefold() == "/resume":
+                selected = _select_session(
+                    session_store,
+                    session.session_id,
+                    input_fn,
+                    output,
+                )
+                if selected is not None:
+                    session = selected
+                    loop = _create_loop(
+                        model_client,
+                        workspace,
+                        args.max_steps,
+                        session,
+                        output,
+                    )
+                    print(
+                        f"Resumed: {session.title} ({session.turn_count} turns)",
+                        file=output,
+                    )
+                continue
+            if not task:
+                continue
+            _run_turn(task, loop, session, session_store, output)
+    except (
+        ModelClientError,
+        ModelConfigError,
+        OSError,
+        SessionError,
+        ValueError,
+    ) as exc:
         print(f"Error: {_user_error_message(exc)}", file=output)
         return 1
+
+
+def _create_loop(
+    model_client: ModelClient,
+    workspace: Path,
+    max_steps: int,
+    session: Session,
+    output: TextIO,
+) -> AgentLoop:
+    executor = ToolExecutor(workspace)
+    return AgentLoop(
+        model_client,
+        tools=executor.definitions,
+        tool_executor=ConsoleToolExecutor(executor, output),
+        max_steps=max_steps,
+        history=session.messages,
+    )
+
+
+def _select_session(
+    store: SessionStore,
+    current_session_id: str,
+    input_fn: Callable[[str], str],
+    output: TextIO,
+) -> Session | None:
+    sessions = [
+        session
+        for session in store.list_recent()
+        if session.session_id != current_session_id
+    ]
+    if not sessions:
+        print("No other saved sessions.", file=output)
+        return None
+
+    print("Recent sessions", file=output)
+    for index, session in enumerate(sessions, start=1):
+        updated = datetime.fromisoformat(session.updated_at).astimezone()
+        print(
+            f"  {index}. {session.title}\n"
+            f"     {updated:%m-%d %H:%M} · {session.turn_count} turns",
+            file=output,
+        )
+    print("Press Enter to cancel.", file=output)
+
+    while True:
+        try:
+            choice = input_fn("Resume> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nResume cancelled.", file=output)
+            return None
+        if not choice:
+            return None
+        if choice.isdigit() and 1 <= int(choice) <= len(sessions):
+            return sessions[int(choice) - 1]
+        print("Choose a session number from the list.", file=output)
+
+
+def _run_turn(
+    task: str,
+    loop: AgentLoop,
+    session: Session,
+    session_store: SessionStore,
+    output: TextIO,
+) -> int:
+    """Run and save one turn of a conversation."""
+
+    print(f"You: {task}", file=output)
+    try:
+        answer = loop.run(task, system_prompt=SYSTEM_PROMPT)
+    except AgentLoopError as exc:
+        session.messages = loop.messages
+        session_store.save(session)
+        print(f"Error: {_user_error_message(exc)}", file=output)
+        return 1
+
+    session.messages = loop.messages
+    session_store.save(session)
+    print("Agent:", file=output)
+    print(answer or "(No final response.)", file=output)
+    print("-" * 60, file=output)
+    return 0
 
 
 def main() -> None:

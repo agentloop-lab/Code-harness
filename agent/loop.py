@@ -41,6 +41,7 @@ class AgentLoop:
         tools: Sequence[Mapping[str, Any]] | None = None,
         tool_executor: ToolExecutor | None = None,
         max_steps: int = 10,
+        history: Sequence[Mapping[str, Any]] | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1.")
@@ -49,15 +50,15 @@ class AgentLoop:
         self.tools = list(tools) if tools else None
         self.tool_executor = tool_executor
         self.max_steps = max_steps
+        self.messages = [dict(message) for message in history or []]
         self.state: AgentState | None = None
 
     def run(self, task: str, system_prompt: str | None = None) -> str:
-        messages: list[dict[str, Any]] = []
-        if system_prompt:
-            messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": task})
+        if not self.messages and system_prompt:
+            self.messages.append({"role": "system", "content": system_prompt})
+        self.messages.append({"role": "user", "content": task})
 
-        self.state = AgentState(messages=messages, max_steps=self.max_steps)
+        self.state = AgentState(messages=self.messages, max_steps=self.max_steps)
 
         while self.state.current_step < self.state.max_steps:
             self.state.current_step += 1

@@ -38,6 +38,47 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(loop.state.current_step, 1)
         self.assertEqual(loop.state.task_status, "completed")
 
+    def test_keeps_messages_between_turns(self) -> None:
+        self.model_client.chat.side_effect = [
+            model_response(content="First answer"),
+            model_response(content="Second answer"),
+        ]
+        loop = AgentLoop(self.model_client)
+
+        loop.run("First task", system_prompt="System prompt")
+        result = loop.run("Follow-up task", system_prompt="System prompt")
+
+        self.assertEqual(result, "Second answer")
+        self.assertEqual(
+            self.model_client.chat.call_args_list[1],
+            call(
+                [
+                    {"role": "system", "content": "System prompt"},
+                    {"role": "user", "content": "First task"},
+                    {"role": "assistant", "content": "First answer"},
+                    {"role": "user", "content": "Follow-up task"},
+                ],
+                None,
+            ),
+        )
+
+    def test_continues_from_saved_history(self) -> None:
+        history = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "Create app.py"},
+            {"role": "assistant", "content": "Created it"},
+        ]
+        self.model_client.chat.return_value = model_response(content="Updated it")
+        loop = AgentLoop(self.model_client, history=history)
+
+        loop.run("Now update it", system_prompt="System prompt")
+
+        sent_messages = self.model_client.chat.call_args.args[0]
+        self.assertEqual(sent_messages[:-1], history)
+        self.assertEqual(
+            sent_messages[-1], {"role": "user", "content": "Now update it"}
+        )
+
     def test_executes_tool_and_returns_observation_to_model(self) -> None:
         tools = [{"type": "function", "function": {"name": "read_file"}}]
         first_response = model_response(tool_calls=[tool_call()])
