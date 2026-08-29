@@ -25,6 +25,25 @@ from tools.file_tools import (
 from tools.paths import WorkspacePathError, resolve_workspace_path
 
 
+TOOL_DEFINITIONS = (
+    LIST_FILES_DEFINITION,
+    READ_FILE_DEFINITION,
+    SEARCH_TEXT_DEFINITION,
+    WRITE_FILE_DEFINITION,
+    EDIT_FILE_DEFINITION,
+    RUN_COMMAND_DEFINITION,
+)
+
+TOOL_HANDLERS = {
+    "list_files": list_files,
+    "read_file": read_file,
+    "search_text": search_text,
+    "write_file": write_file,
+    "edit_file": edit_file,
+    "run_command": run_command,
+}
+
+
 class ToolExecutor:
     """Execute the tools available for one workspace."""
 
@@ -34,17 +53,10 @@ class ToolExecutor:
 
     @property
     def definitions(self) -> list[dict[str, Any]]:
-        return [
-            LIST_FILES_DEFINITION,
-            READ_FILE_DEFINITION,
-            SEARCH_TEXT_DEFINITION,
-            WRITE_FILE_DEFINITION,
-            EDIT_FILE_DEFINITION,
-            RUN_COMMAND_DEFINITION,
-        ]
+        return list(TOOL_DEFINITIONS)
 
     def __call__(self, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        handler = self._handlers().get(name)
+        handler = TOOL_HANDLERS.get(name)
         if handler is None:
             return ToolResult(False, f"Unknown tool: {name}", "UnknownTool").to_dict()
         if not isinstance(arguments, Mapping):
@@ -93,13 +105,6 @@ class ToolExecutor:
                 "ToolError",
             ).to_dict()
 
-        if not isinstance(result, ToolResult):
-            return ToolResult(
-                False,
-                f"Tool returned an invalid result: {name}",
-                "ToolError",
-            ).to_dict()
-
         if name == "read_file" and target is not None:
             if result.success and version is not None:
                 self._file_versions[target] = version
@@ -118,14 +123,3 @@ class ToolExecutor:
             return resolve_workspace_path(self.workspace, path)
         except WorkspacePathError:
             return None
-
-    @staticmethod
-    def _handlers() -> dict[str, Any]:
-        return {
-            "list_files": list_files,
-            "read_file": read_file,
-            "search_text": search_text,
-            "write_file": write_file,
-            "edit_file": edit_file,
-            "run_command": run_command,
-        }

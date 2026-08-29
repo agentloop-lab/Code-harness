@@ -78,6 +78,23 @@ def run_command(
 
     command_list = list(command)
     started_at = time.perf_counter()
+
+    def result(
+        exit_code: int | None,
+        stdout: str | bytes | None = "",
+        stderr: str | bytes | None = "",
+        error_type: str | None = None,
+    ) -> ToolResult:
+        content = _result_content(
+            command_list,
+            exit_code,
+            _as_text(stdout),
+            _as_text(stderr),
+            time.perf_counter() - started_at,
+            max_output_chars,
+        )
+        return ToolResult(error_type is None, content, error_type)
+
     try:
         completed = subprocess.run(
             command_list,
@@ -91,51 +108,26 @@ def run_command(
             check=False,
         )
     except subprocess.TimeoutExpired as exc:
-        duration = time.perf_counter() - started_at
-        content = _result_content(
-            command_list,
-            None,
-            _as_text(exc.stdout),
-            _as_text(exc.stderr),
-            duration,
-            max_output_chars,
-        )
-        return ToolResult(False, content, "CommandTimeout")
+        return result(None, exc.stdout, exc.stderr, "CommandTimeout")
     except FileNotFoundError:
-        duration = time.perf_counter() - started_at
-        content = _result_content(
-            command_list,
+        return result(
             None,
-            "",
-            f"Command not found: {command_list[0]}",
-            duration,
-            max_output_chars,
+            stderr=f"Command not found: {command_list[0]}",
+            error_type="CommandNotFound",
         )
-        return ToolResult(False, content, "CommandNotFound")
     except OSError:
-        duration = time.perf_counter() - started_at
-        content = _result_content(
-            command_list,
+        return result(
             None,
-            "",
-            "Could not run command.",
-            duration,
-            max_output_chars,
+            stderr="Could not run command.",
+            error_type="CommandError",
         )
-        return ToolResult(False, content, "CommandError")
 
-    duration = time.perf_counter() - started_at
-    content = _result_content(
-        command_list,
+    return result(
         completed.returncode,
         completed.stdout,
         completed.stderr,
-        duration,
-        max_output_chars,
+        "CommandFailed" if completed.returncode else None,
     )
-    if completed.returncode != 0:
-        return ToolResult(False, content, "CommandFailed")
-    return ToolResult(True, content)
 
 
 def _valid_command(command: Sequence[str]) -> bool:

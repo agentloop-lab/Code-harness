@@ -151,15 +151,10 @@ def list_files(
             "InvalidArguments",
         )
 
-    root = Path(workspace).resolve()
-    try:
-        target = resolve_workspace_path(root, path)
-    except WorkspacePathError:
-        return ToolResult(
-            False,
-            "Path is outside the workspace.",
-            "PathOutsideWorkspace",
-        )
+    resolved = _resolve_target(workspace, path)
+    if isinstance(resolved, ToolResult):
+        return resolved
+    root, target = resolved
 
     if not target.exists():
         return ToolResult(False, f"Path does not exist: {path}", "FileNotFound")
@@ -216,33 +211,15 @@ def read_file_snapshot(
             None,
         )
 
-    try:
-        target = resolve_workspace_path(workspace, path)
-    except WorkspacePathError:
-        return (
-            ToolResult(
-                False,
-                "Path is outside the workspace.",
-                "PathOutsideWorkspace",
-            ),
-            None,
-        )
+    resolved = _resolve_target(workspace, path)
+    if isinstance(resolved, ToolResult):
+        return resolved, None
+    _, target = resolved
 
-    if not target.exists():
-        return ToolResult(False, f"File does not exist: {path}", "FileNotFound"), None
-    if not target.is_file():
-        return ToolResult(False, f"Path is not a file: {path}", "NotAFile"), None
-
-    try:
-        raw_content = target.read_bytes()
-        content = _decode_text(raw_content)
-    except UnicodeDecodeError:
-        return (
-            ToolResult(False, f"File is not valid UTF-8: {path}", "DecodeError"),
-            None,
-        )
-    except OSError:
-        return ToolResult(False, f"Could not read file: {path}", "ReadError"), None
+    loaded = _read_utf8_file(target, path)
+    if isinstance(loaded, ToolResult):
+        return loaded, None
+    raw_content, content = loaded
 
     version = hashlib.sha256(raw_content).hexdigest()
 
@@ -288,15 +265,10 @@ def search_text(
             "InvalidArguments",
         )
 
-    root = Path(workspace).resolve()
-    try:
-        target = resolve_workspace_path(root, path)
-    except WorkspacePathError:
-        return ToolResult(
-            False,
-            "Path is outside the workspace.",
-            "PathOutsideWorkspace",
-        )
+    resolved = _resolve_target(workspace, path)
+    if isinstance(resolved, ToolResult):
+        return resolved
+    root, target = resolved
 
     if not target.exists():
         return ToolResult(False, f"Path does not exist: {path}", "FileNotFound")
@@ -336,15 +308,10 @@ def write_file(workspace: str | Path, path: str, content: str) -> ToolResult:
     if not isinstance(content, str):
         return ToolResult(False, "content must be a string.", "InvalidArguments")
 
-    root = Path(workspace).resolve()
-    try:
-        target = resolve_workspace_path(root, path)
-    except WorkspacePathError:
-        return ToolResult(
-            False,
-            "Path is outside the workspace.",
-            "PathOutsideWorkspace",
-        )
+    resolved = _resolve_target(workspace, path)
+    if isinstance(resolved, ToolResult):
+        return resolved
+    root, target = resolved
 
     if target.exists():
         return ToolResult(False, f"Path already exists: {path}", "FileAlreadyExists")
@@ -383,28 +350,15 @@ def edit_file(
     if not isinstance(new_text, str):
         return ToolResult(False, "new_text must be a string.", "InvalidArguments")
 
-    root = Path(workspace).resolve()
-    try:
-        target = resolve_workspace_path(root, path)
-    except WorkspacePathError:
-        return ToolResult(
-            False,
-            "Path is outside the workspace.",
-            "PathOutsideWorkspace",
-        )
+    resolved = _resolve_target(workspace, path)
+    if isinstance(resolved, ToolResult):
+        return resolved
+    root, target = resolved
 
-    if not target.exists():
-        return ToolResult(False, f"File does not exist: {path}", "FileNotFound")
-    if not target.is_file():
-        return ToolResult(False, f"Path is not a file: {path}", "NotAFile")
-
-    try:
-        raw_content = target.read_bytes()
-        content = _decode_text(raw_content)
-    except UnicodeDecodeError:
-        return ToolResult(False, f"File is not valid UTF-8: {path}", "DecodeError")
-    except OSError:
-        return ToolResult(False, f"Could not read file: {path}", "ReadError")
+    loaded = _read_utf8_file(target, path)
+    if isinstance(loaded, ToolResult):
+        return loaded
+    raw_content, content = loaded
 
     if expected_version is None:
         return ToolResult(
@@ -467,3 +421,48 @@ def _valid_line_range(start_line: int | None, end_line: int | None) -> bool:
 
 def _decode_text(content: bytes) -> str:
     return content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _resolve_target(
+    workspace: str | Path,
+    path: str,
+) -> tuple[Path, Path] | ToolResult:
+    root = Path(workspace).resolve()
+    try:
+        return root, resolve_workspace_path(root, path)
+    except WorkspacePathError:
+        return ToolResult(
+            False,
+            "Path is outside the workspace.",
+            "PathOutsideWorkspace",
+        )
+
+
+def _read_utf8_file(
+    target: Path,
+    display_path: str,
+) -> tuple[bytes, str] | ToolResult:
+    if not target.exists():
+        return ToolResult(
+            False,
+            f"File does not exist: {display_path}",
+            "FileNotFound",
+        )
+    if not target.is_file():
+        return ToolResult(False, f"Path is not a file: {display_path}", "NotAFile")
+
+    try:
+        raw_content = target.read_bytes()
+        return raw_content, _decode_text(raw_content)
+    except UnicodeDecodeError:
+        return ToolResult(
+            False,
+            f"File is not valid UTF-8: {display_path}",
+            "DecodeError",
+        )
+    except OSError:
+        return ToolResult(
+            False,
+            f"Could not read file: {display_path}",
+            "ReadError",
+        )
