@@ -126,13 +126,6 @@ def _parser() -> argparse.ArgumentParser:
         default=10,
         help="Maximum number of model steps (default: 10).",
     )
-    parser.add_argument(
-        "--resume",
-        nargs="?",
-        const="latest",
-        metavar="SESSION_ID",
-        help="Resume a saved session (default: latest session).",
-    )
     return parser
 
 
@@ -166,11 +159,7 @@ def run_cli(
 
         model_client = ModelClient()
         session_store = SessionStore(DEFAULT_SESSION_DIRECTORY)
-        session = (
-            session_store.load(args.resume)
-            if args.resume
-            else session_store.create()
-        )
+        session = session_store.create()
         loop = _create_loop(model_client, workspace, args.max_steps, session, output)
 
         print("Code Harness", file=output)
@@ -178,8 +167,6 @@ def run_cli(
         print(f"Model:     {model_client.config.model_name}", file=output)
         print(f"Workspace: {workspace}", file=output)
         print(f"Session:   {session.session_id}", file=output)
-        if args.resume:
-            print(f"History:   {session.turn_count} previous turn(s)", file=output)
         print("-" * 60, file=output)
 
         if initial_task:

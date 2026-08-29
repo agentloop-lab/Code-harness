@@ -18,16 +18,5 @@ class SessionStoreTests(unittest.TestCase):
         self.assertEqual(loaded.session_id, session.session_id)
         self.assertEqual(loaded.messages, session.messages)
 
-    def test_loads_latest_session(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            store = SessionStore(Path(temporary_directory))
-            session = store.create()
-            store.save(session)
-
-            loaded = store.load("latest")
-
-        self.assertEqual(loaded.session_id, session.session_id)
-
-
 if __name__ == "__main__":
     unittest.main()

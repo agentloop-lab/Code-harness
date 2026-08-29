@@ -62,8 +62,6 @@ class SessionStore:
         )
 
     def load(self, session_id: str) -> Session:
-        if session_id == "latest":
-            session_id = self._latest_session_id()
         path = self._path(session_id)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -91,13 +89,6 @@ class SessionStore:
             if len(sessions) == limit:
                 break
         return sessions
-
-    def _latest_session_id(self) -> str:
-        try:
-            path = max(self.directory.glob("*.json"), key=lambda item: item.stat().st_mtime)
-        except (ValueError, OSError) as exc:
-            raise SessionError("No saved sessions found.") from exc
-        return path.stem
 
     def _path(self, session_id: str) -> Path:
         if not SESSION_ID_PATTERN.fullmatch(session_id):
