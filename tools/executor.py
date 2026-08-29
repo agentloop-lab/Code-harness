@@ -11,10 +11,12 @@ from tools.base import ToolResult
 from tools.command_tools import RUN_COMMAND_DEFINITION, run_command
 from tools.file_tools import (
     EDIT_FILE_DEFINITION,
+    LIST_FILES_DEFINITION,
     READ_FILE_DEFINITION,
     SEARCH_TEXT_DEFINITION,
     WRITE_FILE_DEFINITION,
     edit_file,
+    list_files,
     read_file,
     read_file_snapshot,
     search_text,
@@ -33,6 +35,7 @@ class ToolExecutor:
     @property
     def definitions(self) -> list[dict[str, Any]]:
         return [
+            LIST_FILES_DEFINITION,
             READ_FILE_DEFINITION,
             SEARCH_TEXT_DEFINITION,
             WRITE_FILE_DEFINITION,
@@ -119,6 +122,7 @@ class ToolExecutor:
     @staticmethod
     def _handlers() -> dict[str, Any]:
         return {
+            "list_files": list_files,
             "read_file": read_file,
             "search_text": search_text,
             "write_file": write_file,

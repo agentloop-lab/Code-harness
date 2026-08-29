@@ -36,6 +36,27 @@ READ_FILE_DEFINITION = {
     },
 }
 
+LIST_FILES_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "list_files",
+        "description": "List file paths inside the workspace.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "path": {"type": "string", "default": "."},
+                "recursive": {"type": "boolean", "default": True},
+                "max_results": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "default": 200,
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+}
+
 SEARCH_TEXT_DEFINITION = {
     "type": "function",
     "function": {
@@ -105,6 +126,68 @@ def read_file(
         max_chars=max_chars,
     )
     return result
+
+
+def list_files(
+    workspace: str | Path,
+    path: str = ".",
+    recursive: bool = True,
+    max_results: int = 200,
+) -> ToolResult:
+    """List bounded, workspace-relative file paths."""
+
+    if not isinstance(path, str) or not path:
+        return ToolResult(False, "path must be a non-empty string.", "InvalidArguments")
+    if not isinstance(recursive, bool):
+        return ToolResult(False, "recursive must be a boolean.", "InvalidArguments")
+    if (
+        not isinstance(max_results, int)
+        or isinstance(max_results, bool)
+        or max_results < 1
+    ):
+        return ToolResult(
+            False,
+            "max_results must be a positive integer.",
+            "InvalidArguments",
+        )
+
+    root = Path(workspace).resolve()
+    try:
+        target = resolve_workspace_path(root, path)
+    except WorkspacePathError:
+        return ToolResult(
+            False,
+            "Path is outside the workspace.",
+            "PathOutsideWorkspace",
+        )
+
+    if not target.exists():
+        return ToolResult(False, f"Path does not exist: {path}", "FileNotFound")
+
+    try:
+        if target.is_file():
+            candidates = [target]
+        elif recursive:
+            candidates = sorted(target.rglob("*"))
+        else:
+            candidates = sorted(target.iterdir())
+
+        files = [
+            candidate.resolve().relative_to(root).as_posix()
+            for candidate in candidates
+            if candidate.is_file() and is_within_workspace(root, candidate)
+        ]
+    except OSError:
+        return ToolResult(False, f"Could not list path: {path}", "ListError")
+
+    if not files:
+        return ToolResult(True, "No files found.")
+    if len(files) > max_results:
+        return ToolResult(
+            True,
+            "\n".join(files[:max_results]) + TRUNCATION_MARKER,
+        )
+    return ToolResult(True, "\n".join(files))
 
 
 def read_file_snapshot(

@@ -64,6 +64,45 @@ class ModelClientTests(unittest.TestCase):
 
         self.assertIsInstance(context.exception.__cause__, RuntimeError)
 
+    def test_reports_request_timeouts(self) -> None:
+        class APITimeoutError(Exception):
+            pass
+
+        self.sdk_client.chat.completions.create.side_effect = APITimeoutError(
+            "Request timed out."
+        )
+
+        with self.assertRaisesRegex(ModelClientError, "request timed out"):
+            self.client.chat([{"role": "user", "content": "Hello"}])
+
+    @patch("openai.OpenAI")
+    def test_retries_once_by_default(self, openai_client: Mock) -> None:
+        ModelClient(config=self.config)
+
+        openai_client.assert_called_once_with(
+            api_key="test-key",
+            timeout=60.0,
+            max_retries=1,
+        )
+
+    @patch("openai.OpenAI")
+    def test_configures_request_timeout_and_retries(self, openai_client: Mock) -> None:
+        ModelClient(
+            config=self.config,
+            request_timeout=12,
+            max_retries=1,
+        )
+
+        openai_client.assert_called_once_with(
+            api_key="test-key",
+            timeout=12.0,
+            max_retries=1,
+        )
+
+    def test_rejects_invalid_request_timeout(self) -> None:
+        with self.assertRaisesRegex(ValueError, "request_timeout"):
+            ModelClient(config=self.config, request_timeout=0)
+
 
 if __name__ == "__main__":
     unittest.main()
