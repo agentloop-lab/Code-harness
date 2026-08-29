@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Mapping, Sequence
 
-from agent.context import ContextManager
+from agent.context import ContextManager, SUMMARY_MARKER
 from agent.model import ModelClient
 
 
@@ -57,8 +57,8 @@ class AgentLoop:
         self.state: AgentState | None = None
 
     def run(self, task: str, system_prompt: str | None = None) -> str:
-        if not self.messages and system_prompt:
-            self.messages.append({"role": "system", "content": system_prompt})
+        if system_prompt:
+            self._set_system_prompt(system_prompt)
         self.messages.append({"role": "user", "content": task})
 
         self.state = AgentState(messages=self.messages, max_steps=self.max_steps)
@@ -102,6 +102,20 @@ class AgentLoop:
         raise AgentLoopLimitError(
             f"Agent reached the maximum of {self.state.max_steps} steps."
         )
+
+    def _set_system_prompt(self, system_prompt: str) -> None:
+        if not self.messages or self.messages[0].get("role") != "system":
+            self.messages.insert(0, {"role": "system", "content": system_prompt})
+            return
+
+        current = self.messages[0].get("content")
+        summary = ""
+        if isinstance(current, str) and SUMMARY_MARKER in current:
+            summary = SUMMARY_MARKER + current.split(SUMMARY_MARKER, 1)[1]
+        self.messages[0] = {
+            "role": "system",
+            "content": f"{system_prompt}{summary}",
+        }
 
     @staticmethod
     def _response_message(response: Any) -> Any:

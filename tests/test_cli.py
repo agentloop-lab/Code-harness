@@ -194,6 +194,51 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(saved.turn_count, 1)
         self.assertIn("Compacted context: 500 -> 100 characters.", output.getvalue())
 
+    @patch("main.AgentLoop")
+    @patch("main.ModelClient")
+    @patch("main.ToolExecutor")
+    def test_memory_commands_persist_and_inject_note(
+        self,
+        executor_class: Mock,
+        model_class: Mock,
+        loop_class: Mock,
+    ) -> None:
+        executor_class.return_value.definitions = []
+        model_class.return_value.config.model_name = "test-model"
+        loop = loop_class.return_value
+        loop.messages = []
+        loop.run.return_value = "Done."
+        inputs = iter(
+            [
+                "/remember Use pytest for tests.",
+                "/memory",
+                "Continue the task",
+                "/exit",
+            ]
+        )
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            with (
+                patch("main.DEFAULT_SESSION_DIRECTORY", root / "sessions"),
+                patch("main.DEFAULT_MEMORY_FILE", root / "memory.md"),
+            ):
+                exit_code = main.run_cli(
+                    ["--workspace", temporary_directory],
+                    input_fn=lambda prompt: next(inputs),
+                    output=output,
+                )
+            notes = main.ProjectMemoryStore(root / "memory.md").items()
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(notes, ["Use pytest for tests."])
+        prompt = loop.run.call_args.kwargs["system_prompt"]
+        self.assertIn("Project memory:\n- Use pytest for tests.", prompt)
+        displayed = output.getvalue()
+        self.assertIn("Project memory updated.", displayed)
+        self.assertIn("  - Use pytest for tests.", displayed)
+
     def test_console_executor_displays_tool_progress(self) -> None:
         executor = Mock(
             return_value={

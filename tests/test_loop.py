@@ -62,6 +62,23 @@ class AgentLoopTests(unittest.TestCase):
             ),
         )
 
+    def test_refreshes_system_prompt_without_losing_summary(self) -> None:
+        history = [
+            {
+                "role": "system",
+                "content": "Old prompt\n\nPrevious conversation summary:\nOld progress",
+            }
+        ]
+        self.model_client.chat.return_value = model_response(content="Done")
+        loop = AgentLoop(self.model_client, history=history)
+
+        loop.run("Continue", system_prompt="New prompt with memory")
+
+        system_message = self.model_client.chat.call_args.args[0][0]["content"]
+        self.assertIn("New prompt with memory", system_message)
+        self.assertIn("Old progress", system_message)
+        self.assertNotIn("Old prompt", system_message)
+
     def test_continues_from_saved_history(self) -> None:
         history = [
             {"role": "system", "content": "System prompt"},

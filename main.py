@@ -12,6 +12,7 @@ from typing import Any, TextIO
 
 from agent.context import ContextError, ContextManager
 from agent.loop import AgentLoop, AgentLoopError
+from agent.memory import ProjectMemoryStore
 from agent.model import ModelClient, ModelClientError, ModelConfigError
 from agent.session import Session, SessionError, SessionStore
 from tools import ToolExecutor
@@ -29,6 +30,7 @@ SYSTEM_PROMPT = (
 )
 DEFAULT_SESSION_DIRECTORY = Path(".agent/sessions")
 DEFAULT_RESULT_DIRECTORY = Path(".agent/results")
+DEFAULT_MEMORY_FILE = Path(".agent/memory.md")
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 
 
@@ -161,6 +163,7 @@ def run_cli(
 
         model_client = ModelClient()
         session_store = SessionStore(DEFAULT_SESSION_DIRECTORY)
+        memory_store = ProjectMemoryStore(DEFAULT_MEMORY_FILE)
         context_manager = ContextManager(
             DEFAULT_RESULT_DIRECTORY,
             on_auto_compaction=lambda before, after: print(
@@ -186,9 +189,16 @@ def run_cli(
         print("-" * 60, file=output)
 
         if initial_task:
-            return _run_turn(initial_task, loop, session, session_store, output)
+            return _run_turn(
+                initial_task,
+                loop,
+                session,
+                session_store,
+                output,
+                _system_prompt(memory_store.items()),
+            )
 
-        print("Commands: /resume  /compact  /exit", file=output)
+        print("Commands: /resume  /compact  /memory  /remember  /exit", file=output)
         while True:
             try:
                 task = input_fn("Task> ").strip()
@@ -231,9 +241,30 @@ def run_cli(
                     output,
                 )
                 continue
+            if task.casefold() == "/memory":
+                _show_memory(memory_store, output)
+                continue
+            if task.casefold() == "/remember" or task.casefold().startswith(
+                "/remember "
+            ):
+                note = task[len("/remember") :].strip()
+                if not note:
+                    print("Usage: /remember <project note>", file=output)
+                elif memory_store.add(note):
+                    print("Project memory updated.", file=output)
+                else:
+                    print("That note is already in project memory.", file=output)
+                continue
             if not task:
                 continue
-            _run_turn(task, loop, session, session_store, output)
+            _run_turn(
+                task,
+                loop,
+                session,
+                session_store,
+                output,
+                _system_prompt(memory_store.items()),
+            )
     except (
         ModelClientError,
         ModelConfigError,
@@ -243,6 +274,23 @@ def run_cli(
     ) as exc:
         print(f"Error: {_user_error_message(exc)}", file=output)
         return 1
+
+
+def _system_prompt(memory: Sequence[str]) -> str:
+    if not memory:
+        return SYSTEM_PROMPT
+    notes = "\n".join(f"- {item}" for item in memory)
+    return f"{SYSTEM_PROMPT}\n\nProject memory:\n{notes}"
+
+
+def _show_memory(store: ProjectMemoryStore, output: TextIO) -> None:
+    notes = store.items()
+    if not notes:
+        print("Project memory is empty.", file=output)
+        return
+    print("Project memory", file=output)
+    for note in notes:
+        print(f"  - {note}", file=output)
 
 
 def _create_loop(
@@ -340,12 +388,13 @@ def _run_turn(
     session: Session,
     session_store: SessionStore,
     output: TextIO,
+    system_prompt: str = SYSTEM_PROMPT,
 ) -> int:
     """Run and save one turn of a conversation."""
 
     print(f"You: {task}", file=output)
     try:
-        answer = loop.run(task, system_prompt=SYSTEM_PROMPT)
+        answer = loop.run(task, system_prompt=system_prompt)
     except AgentLoopError as exc:
         session.messages = loop.messages
         session.total_turns += 1
