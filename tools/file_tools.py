@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import tempfile
 from pathlib import Path
@@ -96,29 +97,71 @@ def read_file(
 ) -> ToolResult:
     """Read all or part of a UTF-8 file within a workspace."""
 
+    result, _ = read_file_snapshot(
+        workspace,
+        path,
+        start_line=start_line,
+        end_line=end_line,
+        max_chars=max_chars,
+    )
+    return result
+
+
+def read_file_snapshot(
+    workspace: str | Path,
+    path: str,
+    start_line: int | None = None,
+    end_line: int | None = None,
+    max_chars: int = DEFAULT_MAX_CHARS,
+) -> tuple[ToolResult, str | None]:
+    """Read a file and return the version of the same bytes."""
+
     if not isinstance(path, str) or not path:
-        return ToolResult(False, "path must be a non-empty string.", "InvalidArguments")
+        return (
+            ToolResult(False, "path must be a non-empty string.", "InvalidArguments"),
+            None,
+        )
     if not _valid_line_range(start_line, end_line):
-        return ToolResult(False, "Invalid line range.", "InvalidArguments")
+        return ToolResult(False, "Invalid line range.", "InvalidArguments"), None
     if not isinstance(max_chars, int) or isinstance(max_chars, bool) or max_chars < 1:
-        return ToolResult(False, "max_chars must be a positive integer.", "InvalidArguments")
+        return (
+            ToolResult(
+                False,
+                "max_chars must be a positive integer.",
+                "InvalidArguments",
+            ),
+            None,
+        )
 
     try:
         target = resolve_workspace_path(workspace, path)
     except WorkspacePathError:
-        return ToolResult(False, "Path is outside the workspace.", "PathOutsideWorkspace")
+        return (
+            ToolResult(
+                False,
+                "Path is outside the workspace.",
+                "PathOutsideWorkspace",
+            ),
+            None,
+        )
 
     if not target.exists():
-        return ToolResult(False, f"File does not exist: {path}", "FileNotFound")
+        return ToolResult(False, f"File does not exist: {path}", "FileNotFound"), None
     if not target.is_file():
-        return ToolResult(False, f"Path is not a file: {path}", "NotAFile")
+        return ToolResult(False, f"Path is not a file: {path}", "NotAFile"), None
 
     try:
-        content = target.read_text(encoding="utf-8")
+        raw_content = target.read_bytes()
+        content = _decode_text(raw_content)
     except UnicodeDecodeError:
-        return ToolResult(False, f"File is not valid UTF-8: {path}", "DecodeError")
+        return (
+            ToolResult(False, f"File is not valid UTF-8: {path}", "DecodeError"),
+            None,
+        )
     except OSError:
-        return ToolResult(False, f"Could not read file: {path}", "ReadError")
+        return ToolResult(False, f"Could not read file: {path}", "ReadError"), None
+
+    version = hashlib.sha256(raw_content).hexdigest()
 
     if start_line is not None or end_line is not None:
         lines = content.splitlines(keepends=True)
@@ -132,7 +175,7 @@ def read_file(
         else:
             content = content[:max_chars]
 
-    return ToolResult(True, content)
+    return ToolResult(True, content), version
 
 
 def search_text(
@@ -241,6 +284,8 @@ def edit_file(
     path: str,
     old_text: str,
     new_text: str,
+    *,
+    expected_version: str | None = None,
 ) -> ToolResult:
     """Replace one unique text block in an existing UTF-8 file."""
 
@@ -271,11 +316,26 @@ def edit_file(
         return ToolResult(False, f"Path is not a file: {path}", "NotAFile")
 
     try:
-        content = target.read_text(encoding="utf-8")
+        raw_content = target.read_bytes()
+        content = _decode_text(raw_content)
     except UnicodeDecodeError:
         return ToolResult(False, f"File is not valid UTF-8: {path}", "DecodeError")
     except OSError:
         return ToolResult(False, f"Could not read file: {path}", "ReadError")
+
+    if expected_version is None:
+        return ToolResult(
+            False,
+            "File must be read before it can be edited.",
+            "ReadRequired",
+        )
+    current_version = hashlib.sha256(raw_content).hexdigest()
+    if current_version != expected_version:
+        return ToolResult(
+            False,
+            "File changed after it was read. Read it again before editing.",
+            "StaleFile",
+        )
 
     match_index = content.find(old_text)
     if match_index == -1:
@@ -320,3 +380,7 @@ def _valid_line_range(start_line: int | None, end_line: int | None) -> bool:
     ):
         return False
     return start_line is None or end_line is None or start_line <= end_line
+
+
+def _decode_text(content: bytes) -> str:
+    return content.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n")

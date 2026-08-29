@@ -43,8 +43,8 @@ class ToolExecutorTests(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["error_type"], "InvalidArguments")
 
-    @patch("tools.executor.read_file", side_effect=RuntimeError("unexpected"))
-    def test_returns_error_for_unexpected_tool_exception(self, read_file_mock) -> None:
+    @patch("tools.executor.read_file_snapshot", side_effect=RuntimeError("unexpected"))
+    def test_returns_error_for_unexpected_tool_exception(self, snapshot_mock) -> None:
         result = self.executor("read_file", {"path": "file.txt"})
 
         self.assertFalse(result["success"])

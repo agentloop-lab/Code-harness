@@ -16,9 +16,11 @@ from tools.file_tools import (
     WRITE_FILE_DEFINITION,
     edit_file,
     read_file,
+    read_file_snapshot,
     search_text,
     write_file,
 )
+from tools.paths import WorkspacePathError, resolve_workspace_path
 
 
 class ToolExecutor:
@@ -26,6 +28,7 @@ class ToolExecutor:
 
     def __init__(self, workspace: str | Path) -> None:
         self.workspace = Path(workspace).resolve()
+        self._file_versions: dict[Path, str] = {}
 
     @property
     def definitions(self) -> list[dict[str, Any]]:
@@ -48,10 +51,21 @@ class ToolExecutor:
                 "InvalidArguments",
             ).to_dict()
 
+        call_arguments = dict(arguments)
+        target = self._argument_path(call_arguments)
+        if name == "edit_file":
+            if "expected_version" in call_arguments:
+                return ToolResult(
+                    False,
+                    "Invalid arguments for tool: edit_file",
+                    "InvalidArguments",
+                ).to_dict()
+            call_arguments["expected_version"] = self._file_versions.get(target)
+
         try:
             bound_arguments = inspect.signature(handler).bind(
                 self.workspace,
-                **dict(arguments),
+                **call_arguments,
             )
         except TypeError:
             return ToolResult(
@@ -61,7 +75,14 @@ class ToolExecutor:
             ).to_dict()
 
         try:
-            result = handler(*bound_arguments.args, **bound_arguments.kwargs)
+            if name == "read_file":
+                result, version = read_file_snapshot(
+                    *bound_arguments.args,
+                    **bound_arguments.kwargs,
+                )
+            else:
+                result = handler(*bound_arguments.args, **bound_arguments.kwargs)
+                version = None
         except Exception:
             return ToolResult(
                 False,
@@ -75,7 +96,25 @@ class ToolExecutor:
                 f"Tool returned an invalid result: {name}",
                 "ToolError",
             ).to_dict()
+
+        if name == "read_file" and target is not None:
+            if result.success and version is not None:
+                self._file_versions[target] = version
+            else:
+                self._file_versions.pop(target, None)
+        elif name == "edit_file" and target is not None:
+            if result.success or result.error_type == "StaleFile":
+                self._file_versions.pop(target, None)
         return result.to_dict()
+
+    def _argument_path(self, arguments: Mapping[str, Any]) -> Path | None:
+        path = arguments.get("path")
+        if not isinstance(path, str) or not path:
+            return None
+        try:
+            return resolve_workspace_path(self.workspace, path)
+        except WorkspacePathError:
+            return None
 
     @staticmethod
     def _handlers() -> dict[str, Any]:
