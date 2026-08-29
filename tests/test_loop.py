@@ -129,6 +129,25 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(len(loop.state.tool_calls), 1)
         self.assertEqual(loop.state.task_status, "completed")
 
+    def test_processes_tool_results_with_context_manager(self) -> None:
+        self.model_client.chat.side_effect = [
+            model_response(tool_calls=[tool_call()]),
+            model_response(content="Done"),
+        ]
+        self.tool_executor.return_value = "large output"
+        context_manager = Mock()
+        context_manager.process_tool_result.return_value = "stored preview"
+        loop = AgentLoop(
+            self.model_client,
+            tool_executor=self.tool_executor,
+            context_manager=context_manager,
+        )
+
+        loop.run("Inspect a.py")
+
+        context_manager.process_tool_result.assert_called_once_with("large output")
+        self.assertEqual(loop.messages[2]["content"], "stored preview")
+
     def test_returns_invalid_arguments_to_model(self) -> None:
         self.model_client.chat.side_effect = [
             model_response(tool_calls=[tool_call(arguments="not-json")]),

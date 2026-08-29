@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
+from agent.context import ContextError, ContextManager
 from agent.loop import AgentLoop, AgentLoopError
 from agent.model import ModelClient, ModelClientError, ModelConfigError
 from agent.session import Session, SessionError, SessionStore
@@ -27,6 +28,7 @@ SYSTEM_PROMPT = (
     "result in your final answer."
 )
 DEFAULT_SESSION_DIRECTORY = Path(".agent/sessions")
+DEFAULT_RESULT_DIRECTORY = Path(".agent/results")
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 
 
@@ -159,8 +161,16 @@ def run_cli(
 
         model_client = ModelClient()
         session_store = SessionStore(DEFAULT_SESSION_DIRECTORY)
+        context_manager = ContextManager(DEFAULT_RESULT_DIRECTORY)
         session = session_store.create()
-        loop = _create_loop(model_client, workspace, args.max_steps, session, output)
+        loop = _create_loop(
+            model_client,
+            workspace,
+            args.max_steps,
+            session,
+            context_manager,
+            output,
+        )
 
         print("Code Harness", file=output)
         print("=" * 60, file=output)
@@ -172,7 +182,7 @@ def run_cli(
         if initial_task:
             return _run_turn(initial_task, loop, session, session_store, output)
 
-        print("Commands: /resume  /exit", file=output)
+        print("Commands: /resume  /compact  /exit", file=output)
         while True:
             try:
                 task = input_fn("Task> ").strip()
@@ -196,12 +206,24 @@ def run_cli(
                         workspace,
                         args.max_steps,
                         session,
+                        context_manager,
                         output,
                     )
                     print(
-                        f"Resumed: {session.title} ({session.turn_count} turns)",
+                        f"Resumed: {session.display_title} "
+                        f"({session.turn_count} turns)",
                         file=output,
                     )
+                continue
+            if task.casefold() == "/compact":
+                _compact_session(
+                    context_manager,
+                    model_client,
+                    loop,
+                    session,
+                    session_store,
+                    output,
+                )
                 continue
             if not task:
                 continue
@@ -222,6 +244,7 @@ def _create_loop(
     workspace: Path,
     max_steps: int,
     session: Session,
+    context_manager: ContextManager,
     output: TextIO,
 ) -> AgentLoop:
     executor = ToolExecutor(workspace)
@@ -231,6 +254,7 @@ def _create_loop(
         tool_executor=ConsoleToolExecutor(executor, output),
         max_steps=max_steps,
         history=session.messages,
+        context_manager=context_manager,
     )
 
 
@@ -253,7 +277,7 @@ def _select_session(
     for index, session in enumerate(sessions, start=1):
         updated = datetime.fromisoformat(session.updated_at).astimezone()
         print(
-            f"  {index}. {session.title}\n"
+            f"  {index}. {session.display_title}\n"
             f"     {updated:%m-%d %H:%M} · {session.turn_count} turns",
             file=output,
         )
@@ -272,6 +296,38 @@ def _select_session(
         print("Choose a session number from the list.", file=output)
 
 
+def _compact_session(
+    context_manager: ContextManager,
+    model_client: ModelClient,
+    loop: AgentLoop,
+    session: Session,
+    session_store: SessionStore,
+    output: TextIO,
+) -> None:
+    if session.turn_count == 0:
+        print("Nothing to compact yet.", file=output)
+        return
+
+    if not session.title:
+        session.title = session.display_title
+    before = context_manager.estimate_size(loop.messages)
+    try:
+        compacted = context_manager.compact_history(loop.messages, model_client)
+    except (ContextError, ModelClientError) as exc:
+        print(f"Error: {exc}", file=output)
+        return
+
+    after = context_manager.estimate_size(compacted)
+    if after >= before:
+        print(f"Context is already compact ({before:,} characters).", file=output)
+        return
+
+    loop.messages = compacted
+    session.messages = compacted
+    session_store.save(session)
+    print(f"Compacted context: {before:,} -> {after:,} characters.", file=output)
+
+
 def _run_turn(
     task: str,
     loop: AgentLoop,
@@ -286,11 +342,13 @@ def _run_turn(
         answer = loop.run(task, system_prompt=SYSTEM_PROMPT)
     except AgentLoopError as exc:
         session.messages = loop.messages
+        session.total_turns += 1
         session_store.save(session)
         print(f"Error: {_user_error_message(exc)}", file=output)
         return 1
 
     session.messages = loop.messages
+    session.total_turns += 1
     session_store.save(session)
     print("Agent:", file=output)
     print(answer or "(No final response.)", file=output)

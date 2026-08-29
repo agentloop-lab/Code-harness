@@ -17,6 +17,8 @@ class SessionStoreTests(unittest.TestCase):
 
         self.assertEqual(loaded.session_id, session.session_id)
         self.assertEqual(loaded.messages, session.messages)
+        self.assertEqual(loaded.display_title, "Hello")
+        self.assertEqual(loaded.turn_count, 1)
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,9 +26,13 @@ class Session:
     created_at: str
     updated_at: str
     messages: list[dict[str, Any]] = field(default_factory=list)
+    title: str = ""
+    total_turns: int = 0
 
     @property
-    def title(self) -> str:
+    def display_title(self) -> str:
+        if self.title:
+            return self.title
         for message in self.messages:
             if message.get("role") == "user" and isinstance(message.get("content"), str):
                 title = " ".join(message["content"].split())
@@ -37,7 +41,7 @@ class Session:
 
     @property
     def turn_count(self) -> int:
-        return sum(message.get("role") == "user" for message in self.messages)
+        return self.total_turns
 
 
 class SessionStore:
@@ -54,6 +58,12 @@ class SessionStore:
 
     def save(self, session: Session) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
+        if not session.title:
+            session.title = session.display_title
+        session.total_turns = max(
+            session.total_turns,
+            sum(message.get("role") == "user" for message in session.messages),
+        )
         session.updated_at = datetime.now(timezone.utc).isoformat()
         path = self._path(session.session_id)
         path.write_text(
@@ -65,11 +75,17 @@ class SessionStore:
         path = self._path(session_id)
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            messages = data.get("messages", [])
             return Session(
                 session_id=data["session_id"],
                 created_at=data["created_at"],
                 updated_at=data["updated_at"],
-                messages=data.get("messages", []),
+                messages=messages,
+                title=data.get("title", ""),
+                total_turns=data.get(
+                    "total_turns",
+                    sum(message.get("role") == "user" for message in messages),
+                ),
             )
         except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
             raise SessionError(f"Could not load session '{session_id}'.") from exc

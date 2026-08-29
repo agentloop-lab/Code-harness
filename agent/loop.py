@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field
 from typing import Any, Callable, Literal, Mapping, Sequence
 
+from agent.context import ContextManager
 from agent.model import ModelClient
 
 
@@ -42,6 +43,7 @@ class AgentLoop:
         tool_executor: ToolExecutor | None = None,
         max_steps: int = 10,
         history: Sequence[Mapping[str, Any]] | None = None,
+        context_manager: ContextManager | None = None,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1.")
@@ -51,6 +53,7 @@ class AgentLoop:
         self.tool_executor = tool_executor
         self.max_steps = max_steps
         self.messages = [dict(message) for message in history or []]
+        self.context_manager = context_manager
         self.state: AgentState | None = None
 
     def run(self, task: str, system_prompt: str | None = None) -> str:
@@ -160,6 +163,8 @@ class AgentLoop:
                 "ToolError",
                 f"Tool returned an invalid result: {name}",
             )
+        if self.context_manager is not None:
+            content = self.context_manager.process_tool_result(content)
         return {
             "role": "tool",
             "tool_call_id": tool_call["id"],

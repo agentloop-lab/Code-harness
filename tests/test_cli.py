@@ -50,6 +50,7 @@ class CommandLineTests(unittest.TestCase):
             tool_executor=unittest.mock.ANY,
             max_steps=10,
             history=[],
+            context_manager=unittest.mock.ANY,
         )
         loop.run.assert_called_once_with(
             "Fix the failing test",
@@ -146,6 +147,52 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn("Recent sessions", displayed)
         self.assertIn("Build a calculator", displayed)
         self.assertIn("Resumed: Build a calculator", displayed)
+
+    @patch("main.ContextManager")
+    @patch("main.AgentLoop")
+    @patch("main.ModelClient")
+    @patch("main.ToolExecutor")
+    def test_compact_command_replaces_and_saves_history(
+        self,
+        executor_class: Mock,
+        model_class: Mock,
+        loop_class: Mock,
+        context_class: Mock,
+    ) -> None:
+        executor_class.return_value.definitions = []
+        model_class.return_value.config.model_name = "test-model"
+        loop = loop_class.return_value
+        loop.messages = [
+            {"role": "system", "content": "System prompt"},
+            {"role": "user", "content": "Build a calculator"},
+            {"role": "assistant", "content": "Created it"},
+        ]
+        loop.run.return_value = "Done."
+        compacted = [{"role": "system", "content": "Conversation summary"}]
+        manager = context_class.return_value
+        manager.compact_history.return_value = compacted
+        manager.estimate_size.side_effect = [500, 100]
+        inputs = iter(["Continue the task", "/compact", "/exit"])
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            session_directory = Path(temporary_directory) / "sessions"
+            with patch("main.DEFAULT_SESSION_DIRECTORY", session_directory):
+                exit_code = main.run_cli(
+                    ["--workspace", temporary_directory],
+                    input_fn=lambda prompt: next(inputs),
+                    output=output,
+                )
+
+            saved = main.SessionStore(session_directory).list_recent()[0]
+
+        self.assertEqual(exit_code, 0)
+        manager.compact_history.assert_called_once()
+        self.assertEqual(loop.messages, compacted)
+        self.assertEqual(saved.messages, compacted)
+        self.assertEqual(saved.display_title, "Build a calculator")
+        self.assertEqual(saved.turn_count, 1)
+        self.assertIn("Compacted context: 500 -> 100 characters.", output.getvalue())
 
     def test_console_executor_displays_tool_progress(self) -> None:
         executor = Mock(
