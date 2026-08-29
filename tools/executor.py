@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from tools.base import ToolResult
 from tools.command_tools import RUN_COMMAND_DEFINITION, run_command
@@ -36,16 +38,51 @@ class ToolExecutor:
         ]
 
     def __call__(self, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
-        if name == "read_file":
-            result = read_file(self.workspace, **arguments)
-        elif name == "search_text":
-            result = search_text(self.workspace, **arguments)
-        elif name == "write_file":
-            result = write_file(self.workspace, **arguments)
-        elif name == "edit_file":
-            result = edit_file(self.workspace, **arguments)
-        elif name == "run_command":
-            result = run_command(self.workspace, **arguments)
-        else:
-            result = ToolResult(False, f"Unknown tool: {name}", "UnknownTool")
+        handler = self._handlers().get(name)
+        if handler is None:
+            return ToolResult(False, f"Unknown tool: {name}", "UnknownTool").to_dict()
+        if not isinstance(arguments, Mapping):
+            return ToolResult(
+                False,
+                f"Invalid arguments for tool: {name}",
+                "InvalidArguments",
+            ).to_dict()
+
+        try:
+            bound_arguments = inspect.signature(handler).bind(
+                self.workspace,
+                **dict(arguments),
+            )
+        except TypeError:
+            return ToolResult(
+                False,
+                f"Invalid arguments for tool: {name}",
+                "InvalidArguments",
+            ).to_dict()
+
+        try:
+            result = handler(*bound_arguments.args, **bound_arguments.kwargs)
+        except Exception:
+            return ToolResult(
+                False,
+                f"Tool execution failed: {name}",
+                "ToolError",
+            ).to_dict()
+
+        if not isinstance(result, ToolResult):
+            return ToolResult(
+                False,
+                f"Tool returned an invalid result: {name}",
+                "ToolError",
+            ).to_dict()
         return result.to_dict()
+
+    @staticmethod
+    def _handlers() -> dict[str, Any]:
+        return {
+            "read_file": read_file,
+            "search_text": search_text,
+            "write_file": write_file,
+            "edit_file": edit_file,
+            "run_command": run_command,
+        }

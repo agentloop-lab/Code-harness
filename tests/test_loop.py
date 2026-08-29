@@ -1,3 +1,4 @@
+import json
 import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, call
@@ -87,20 +88,41 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(len(loop.state.tool_calls), 1)
         self.assertEqual(loop.state.task_status, "completed")
 
-    def test_rejects_invalid_tool_arguments(self) -> None:
-        self.model_client.chat.return_value = model_response(
-            tool_calls=[tool_call(arguments="not-json")]
-        )
+    def test_returns_invalid_arguments_to_model(self) -> None:
+        self.model_client.chat.side_effect = [
+            model_response(tool_calls=[tool_call(arguments="not-json")]),
+            model_response(content="Recovered"),
+        ]
         loop = AgentLoop(
             self.model_client,
             tool_executor=self.tool_executor,
         )
 
-        with self.assertRaisesRegex(AgentLoopError, "invalid JSON"):
-            loop.run("Inspect a.py")
+        result = loop.run("Inspect a.py")
+        tool_result = json.loads(loop.state.messages[2]["content"])
 
+        self.assertEqual(result, "Recovered")
+        self.assertEqual(tool_result["error_type"], "InvalidArguments")
         self.tool_executor.assert_not_called()
-        self.assertEqual(loop.state.task_status, "failed")
+        self.assertEqual(loop.state.task_status, "completed")
+
+    def test_returns_tool_execution_error_to_model(self) -> None:
+        self.model_client.chat.side_effect = [
+            model_response(tool_calls=[tool_call()]),
+            model_response(content="Recovered"),
+        ]
+        self.tool_executor.side_effect = RuntimeError("tool failed")
+        loop = AgentLoop(
+            self.model_client,
+            tool_executor=self.tool_executor,
+        )
+
+        result = loop.run("Inspect a.py")
+        tool_result = json.loads(loop.state.messages[2]["content"])
+
+        self.assertEqual(result, "Recovered")
+        self.assertEqual(tool_result["error_type"], "ToolError")
+        self.assertEqual(loop.state.task_status, "completed")
 
     def test_marks_model_errors_as_failed(self) -> None:
         self.model_client.chat.side_effect = RuntimeError("network")

@@ -112,33 +112,76 @@ class AgentLoop:
         return result, tool_calls
 
     def _execute_tool(self, tool_call: Mapping[str, Any]) -> dict[str, Any]:
-        if self.tool_executor is None:
-            raise AgentLoopError("A tool executor is required for tool calls.")
-
         function = tool_call["function"]
         name = function["name"]
         raw_arguments = function["arguments"]
         try:
             arguments = json.loads(raw_arguments)
-        except json.JSONDecodeError as exc:
-            raise AgentLoopError(
-                f"Tool '{name}' returned invalid JSON arguments."
-            ) from exc
+        except json.JSONDecodeError:
+            return self._tool_error_message(
+                tool_call["id"],
+                "InvalidArguments",
+                f"Tool '{name}' arguments are not valid JSON.",
+            )
 
         if not isinstance(arguments, dict):
-            raise AgentLoopError(f"Tool '{name}' arguments must be a JSON object.")
+            return self._tool_error_message(
+                tool_call["id"],
+                "InvalidArguments",
+                f"Tool '{name}' arguments must be a JSON object.",
+            )
+
+        if self.tool_executor is None:
+            return self._tool_error_message(
+                tool_call["id"],
+                "ToolUnavailable",
+                "No tool executor is available.",
+            )
 
         try:
             result = self.tool_executor(name, arguments)
-        except Exception as exc:
-            raise AgentLoopError(f"Tool '{name}' failed.") from exc
+        except Exception:
+            return self._tool_error_message(
+                tool_call["id"],
+                "ToolError",
+                f"Tool execution failed: {name}",
+            )
 
-        content = result if isinstance(result, str) else json.dumps(
-            result, ensure_ascii=False
-        )
+        try:
+            content = (
+                result
+                if isinstance(result, str)
+                else json.dumps(result, ensure_ascii=False)
+            )
+        except (TypeError, ValueError):
+            return self._tool_error_message(
+                tool_call["id"],
+                "ToolError",
+                f"Tool returned an invalid result: {name}",
+            )
         return {
             "role": "tool",
             "tool_call_id": tool_call["id"],
+            "content": content,
+        }
+
+    @staticmethod
+    def _tool_error_message(
+        tool_call_id: str,
+        error_type: str,
+        message: str,
+    ) -> dict[str, Any]:
+        content = json.dumps(
+            {
+                "success": False,
+                "content": message,
+                "error_type": error_type,
+            },
+            ensure_ascii=False,
+        )
+        return {
+            "role": "tool",
+            "tool_call_id": tool_call_id,
             "content": content,
         }
 
