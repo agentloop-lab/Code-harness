@@ -33,6 +33,47 @@ class ContextManagerTests(unittest.TestCase):
             self.assertIn("Full output stored at", compacted)
             self.assertNotIn("fghijklmnopqrstu", compacted)
 
+    def test_prunes_old_tool_results_without_changing_history(self) -> None:
+        manager = ContextManager(Path("results"), recent_tool_results=1)
+        messages = []
+        for index, content in enumerate(
+            [
+                '{"success": true, "content": "old output"}',
+                '{"success": false, "content": "important error"}',
+                '{"success": true, "content": "recent output"}',
+            ]
+        ):
+            call_id = f"call-{index}"
+            messages.extend(
+                [
+                    {
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": call_id,
+                                "function": {
+                                    "name": "run_command",
+                                    "arguments": "{}",
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": content,
+                    },
+                ]
+            )
+
+        context = manager.build_context(messages)
+
+        self.assertIn("omitted", context[1]["content"])
+        self.assertIn("important error", context[3]["content"])
+        self.assertIn("recent output", context[5]["content"])
+        self.assertIn("old output", messages[1]["content"])
+
     def test_compacts_history_into_one_summary(self) -> None:
         model_client = Mock()
         model_client.chat.return_value = summary_response("- Progress: fixed app.py")

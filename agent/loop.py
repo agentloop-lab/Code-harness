@@ -66,8 +66,13 @@ class AgentLoop:
         while self.state.current_step < self.state.max_steps:
             self.state.current_step += 1
             try:
+                context = (
+                    self.context_manager.build_context(self.state.messages)
+                    if self.context_manager is not None
+                    else list(self.state.messages)
+                )
                 response = self.model_client.chat(
-                    list(self.state.messages), self.tools
+                    context, self.tools
                 )
                 message = self._response_message(response)
                 assistant_message, tool_calls = self._assistant_message(message)

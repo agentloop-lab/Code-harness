@@ -13,6 +13,8 @@ from agent.model import ModelClient
 
 DEFAULT_TOOL_RESULT_LIMIT = 12_000
 DEFAULT_PREVIEW_SIZE = 2_000
+DEFAULT_RECENT_TOOL_RESULTS = 6
+PRUNABLE_TOOL_NAMES = {"list_files", "read_file", "search_text", "run_command"}
 SUMMARY_MARKER = "\n\nPrevious conversation summary:\n"
 COMPACTION_PROMPT = """Summarize the coding-agent conversation for future turns.
 Preserve only useful working context under these headings:
@@ -39,10 +41,12 @@ class ContextManager:
         results_directory: Path,
         tool_result_limit: int = DEFAULT_TOOL_RESULT_LIMIT,
         preview_size: int = DEFAULT_PREVIEW_SIZE,
+        recent_tool_results: int = DEFAULT_RECENT_TOOL_RESULTS,
     ) -> None:
         self.results_directory = results_directory
         self.tool_result_limit = tool_result_limit
         self.preview_size = preview_size
+        self.recent_tool_results = recent_tool_results
 
     def process_tool_result(self, content: str) -> str:
         if len(content) <= self.tool_result_limit:
@@ -62,6 +66,37 @@ class ContextManager:
             f"{preview}\n"
             "Run a narrower tool call if more detail is needed."
         )
+
+    def build_context(
+        self,
+        messages: Sequence[Mapping[str, Any]],
+    ) -> list[dict[str, Any]]:
+        context = [dict(message) for message in messages]
+        tool_names = self._tool_names(messages)
+        candidates = [
+            index
+            for index, message in enumerate(messages)
+            if message.get("role") == "tool"
+            and tool_names.get(message.get("tool_call_id")) in PRUNABLE_TOOL_NAMES
+        ]
+        keep = set(candidates[-self.recent_tool_results :])
+
+        failed = [
+            index
+            for index in candidates
+            if self._tool_result_failed(messages[index].get("content"))
+        ]
+        if failed:
+            keep.add(failed[-1])
+
+        for index in candidates:
+            if index in keep:
+                continue
+            tool_name = tool_names.get(messages[index].get("tool_call_id"), "tool")
+            context[index]["content"] = (
+                f"[Earlier {tool_name} result omitted to reduce context.]"
+            )
+        return context
 
     def compact_history(
         self,
@@ -93,6 +128,30 @@ class ContextManager:
     @staticmethod
     def estimate_size(messages: Sequence[Mapping[str, Any]]) -> int:
         return len(json.dumps(list(messages), ensure_ascii=False))
+
+    @staticmethod
+    def _tool_names(messages: Sequence[Mapping[str, Any]]) -> dict[Any, str]:
+        names = {}
+        for message in messages:
+            for tool_call in message.get("tool_calls") or []:
+                if not isinstance(tool_call, Mapping):
+                    continue
+                function = tool_call.get("function")
+                if isinstance(function, Mapping) and isinstance(
+                    function.get("name"), str
+                ):
+                    names[tool_call.get("id")] = function["name"]
+        return names
+
+    @staticmethod
+    def _tool_result_failed(content: Any) -> bool:
+        if not isinstance(content, str):
+            return False
+        try:
+            result = json.loads(content)
+        except json.JSONDecodeError:
+            return False
+        return isinstance(result, Mapping) and result.get("success") is False
 
     @staticmethod
     def _response_text(response: Any) -> str:

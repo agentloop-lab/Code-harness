@@ -136,6 +136,7 @@ class AgentLoopTests(unittest.TestCase):
         ]
         self.tool_executor.return_value = "large output"
         context_manager = Mock()
+        context_manager.build_context.side_effect = lambda messages: list(messages)
         context_manager.process_tool_result.return_value = "stored preview"
         loop = AgentLoop(
             self.model_client,
@@ -146,6 +147,7 @@ class AgentLoopTests(unittest.TestCase):
         loop.run("Inspect a.py")
 
         context_manager.process_tool_result.assert_called_once_with("large output")
+        self.assertEqual(context_manager.build_context.call_count, 2)
         self.assertEqual(loop.messages[2]["content"], "stored preview")
 
     def test_returns_invalid_arguments_to_model(self) -> None:
