@@ -1,3 +1,4 @@
+import asyncio
 import io
 import sys
 import tempfile
@@ -5,12 +6,76 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from prompt_toolkit.document import Document
+from prompt_toolkit.data_structures import Size
+from prompt_toolkit.input.defaults import create_pipe_input
+from prompt_toolkit.output.vt100 import Vt100_Output
+
 import main
 from agent.loop import AgentLoopError
 from agent.model import ModelClientError
 
 
 class CommandLineTests(unittest.TestCase):
+    def test_completes_slash_command_prefixes(self) -> None:
+        completer = main.SlashCommandCompleter()
+
+        status_matches = list(
+            completer.get_completions(Document("/st"), Mock())
+        )
+        task_matches = list(
+            completer.get_completions(Document("create file"), Mock())
+        )
+
+        self.assertEqual(
+            [completion.text for completion in status_matches],
+            ["/status"],
+        )
+        self.assertEqual(task_matches, [])
+
+    def test_renders_and_selects_slash_commands(self) -> None:
+        async def run_prompt(history_file: Path) -> tuple[str, str, str]:
+            capture = io.StringIO()
+            terminal_output = Vt100_Output(
+                capture,
+                get_size=lambda: Size(rows=24, columns=120),
+                enable_cpr=False,
+            )
+            with create_pipe_input() as pipe:
+                session = main._task_prompt_session(
+                    history_file,
+                    prompt_input=pipe,
+                    prompt_output=terminal_output,
+                )
+                prompt = asyncio.create_task(session.prompt_async("Task> "))
+                await asyncio.sleep(0.05)
+                pipe.send_text("/")
+                for _ in range(100):
+                    if "/status" in capture.getvalue():
+                        break
+                    await asyncio.sleep(0.01)
+                rendered = capture.getvalue()
+                pipe.send_text("\x1b[B")
+                await asyncio.sleep(0.05)
+                pipe.send_text("\r")
+                selected = await prompt
+                second_prompt = asyncio.create_task(session.prompt_async("Task> "))
+                await asyncio.sleep(0.05)
+                pipe.send_text("\x1b[A")
+                await asyncio.sleep(0.05)
+                pipe.send_text("\r")
+                recalled = await second_prompt
+            return rendered, selected, recalled
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            rendered, selected, recalled = asyncio.run(
+                run_prompt(Path(temporary_directory) / "history")
+            )
+
+        self.assertIn("/status", rendered)
+        self.assertEqual(selected, "/resume")
+        self.assertEqual(recalled, "/resume")
+
     @patch("main.AgentLoop")
     @patch("main.ModelClient")
     @patch("main.ToolExecutor")
@@ -58,10 +123,9 @@ class CommandLineTests(unittest.TestCase):
         )
         self.assertEqual(exit_code, 0)
         displayed = output.getvalue()
-        self.assertIn("Code Harness", displayed)
-        self.assertIn("Model:     test-model", displayed)
-        self.assertIn("You: Fix the failing test", displayed)
-        self.assertIn("Agent:\nFinished.", displayed)
+        self.assertIn("Code Harness | test-model", displayed)
+        self.assertIn("Task> Fix the failing test", displayed)
+        self.assertIn("Agent>\nFinished.", displayed)
 
     @patch("main.AgentLoop")
     @patch("main.ModelClient")
@@ -256,8 +320,10 @@ class CommandLineTests(unittest.TestCase):
         )
 
         self.assertTrue(result["success"])
-        self.assertIn("[1] TOOL  edit_file: app.py", output.getvalue())
-        self.assertIn("    OK    Updated file: app.py", output.getvalue())
+        self.assertEqual(
+            output.getvalue().strip(),
+            "[1] OK    edit_file app.py | Updated file: app.py",
+        )
 
     def test_console_executor_summarizes_command_result(self) -> None:
         executor = Mock(
@@ -276,10 +342,111 @@ class CommandLineTests(unittest.TestCase):
         visible_executor("run_command", {"command": ["python", "hello.py"]})
 
         displayed = output.getvalue()
-        self.assertIn("[1] TOOL  run_command: python hello.py", displayed)
-        self.assertIn("    OUT   Hello!", displayed)
-        self.assertIn("    OK    Command exited with code 0.", displayed)
-        self.assertNotIn('"duration"', displayed)
+        self.assertIn("[1] OK    run_command python hello.py | exit 0 | 0.10s", displayed)
+        self.assertNotIn("Hello!", displayed)
+
+    def test_verbose_console_executor_displays_command_output(self) -> None:
+        executor = Mock(
+            return_value={
+                "success": False,
+                "content": (
+                    '{"command": ["python", "hello.py"], "exit_code": 1, '
+                    '"stdout": "starting\\n", "stderr": "line 1\\nSyntaxError", '
+                    '"duration": 0.2}'
+                ),
+                "error_type": "command_failed",
+            }
+        )
+        output = io.StringIO()
+        settings = main.ConsoleSettings(verbose=True)
+        visible_executor = main.ConsoleToolExecutor(executor, output, settings)
+
+        visible_executor("run_command", {"command": ["python", "hello.py"]})
+
+        displayed = output.getvalue()
+        self.assertIn("FAIL  run_command python hello.py | exit 1", displayed)
+        self.assertIn("| SyntaxError", displayed)
+        self.assertIn("    OUT   starting", displayed)
+        self.assertIn("    ERR   line 1\n    ERR   SyntaxError", displayed)
+
+    @patch("main.AgentLoop")
+    @patch("main.ModelClient")
+    @patch("main.ToolExecutor")
+    def test_verbose_status_and_diff_commands(
+        self,
+        executor_class: Mock,
+        model_class: Mock,
+        loop_class: Mock,
+    ) -> None:
+        executor_class.return_value.definitions = []
+        model_class.return_value.config.model_name = "test-model"
+        loop = loop_class.return_value
+        loop.messages = []
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+
+            def create_file(*args: object, **kwargs: object) -> str:
+                (workspace / "hello.py").write_text(
+                    'print("hello")\n', encoding="utf-8"
+                )
+                return "Done."
+
+            loop.run.side_effect = create_file
+            inputs = iter(
+                ["/verbose", "Create hello.py", "/status", "/diff", "/exit"]
+            )
+            with patch(
+                "main.DEFAULT_SESSION_DIRECTORY",
+                workspace / "sessions",
+            ):
+                exit_code = main.run_cli(
+                    ["--workspace", temporary_directory],
+                    input_fn=lambda prompt: next(inputs),
+                    output=output,
+                )
+
+        self.assertEqual(exit_code, 0)
+        displayed = output.getvalue()
+        self.assertIn("Verbose tool output: on.", displayed)
+        self.assertIn("  A hello.py", displayed)
+        self.assertIn("--- /dev/null", displayed)
+        self.assertIn("+++ b/hello.py", displayed)
+        self.assertIn('+print("hello")', displayed)
+
+    @patch("main.AgentLoop")
+    @patch("main.ModelClient")
+    @patch("main.ToolExecutor")
+    def test_help_lists_commands_and_rejects_unknown_command(
+        self,
+        executor_class: Mock,
+        model_class: Mock,
+        loop_class: Mock,
+    ) -> None:
+        executor_class.return_value.definitions = []
+        model_class.return_value.config.model_name = "test-model"
+        loop_class.return_value.messages = []
+        inputs = iter(["/help", "/unknown", "/exit"])
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with patch(
+                "main.DEFAULT_SESSION_DIRECTORY",
+                Path(temporary_directory) / "sessions",
+            ):
+                exit_code = main.run_cli(
+                    ["--workspace", temporary_directory],
+                    input_fn=lambda prompt: next(inputs),
+                    output=output,
+                )
+
+        self.assertEqual(exit_code, 0)
+        displayed = output.getvalue()
+        self.assertIn("Available commands", displayed)
+        self.assertIn("/remember <note>", displayed)
+        self.assertIn("Unknown command. Type /help", displayed)
+        loop_class.return_value.run.assert_not_called()
 
     def test_system_prompt_uses_the_active_python_interpreter(self) -> None:
         self.assertIn(sys.executable, main.SYSTEM_PROMPT)

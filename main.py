@@ -5,16 +5,26 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
+
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import CompleteEvent, Completer, Completion
+from prompt_toolkit.document import Document
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.input import Input
+from prompt_toolkit.output import Output
+from prompt_toolkit.shortcuts import CompleteStyle
 
 from agent.context import ContextError, ContextManager
 from agent.loop import AgentLoop, AgentLoopError
 from agent.memory import ProjectMemoryStore
 from agent.model import ModelClient, ModelClientError, ModelConfigError
 from agent.session import Session, SessionError, SessionStore
+from agent.workspace import WorkspaceTracker
 from tools import ToolExecutor
 
 
@@ -31,15 +41,67 @@ SYSTEM_PROMPT = (
 DEFAULT_SESSION_DIRECTORY = Path(".agent/sessions")
 DEFAULT_RESULT_DIRECTORY = Path(".agent/results")
 DEFAULT_MEMORY_FILE = Path(".agent/memory.md")
+DEFAULT_HISTORY_FILE = Path(".agent/history")
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
+
+
+@dataclass(frozen=True)
+class SlashCommand:
+    name: str
+    usage: str
+    description: str
+
+
+SLASH_COMMANDS = (
+    SlashCommand("/resume", "/resume", "Resume a saved session"),
+    SlashCommand("/compact", "/compact", "Compact conversation context"),
+    SlashCommand("/memory", "/memory", "Show project memory"),
+    SlashCommand("/remember", "/remember <note>", "Save a project note"),
+    SlashCommand("/verbose", "/verbose", "Toggle full tool output"),
+    SlashCommand("/status", "/status", "Show latest workspace changes"),
+    SlashCommand("/diff", "/diff", "Show latest code changes"),
+    SlashCommand("/help", "/help", "Show available commands"),
+    SlashCommand("/exit", "/exit", "Save the session and exit"),
+)
+
+
+class SlashCommandCompleter(Completer):
+    """Complete slash commands at the start of a task prompt."""
+
+    def get_completions(
+        self,
+        document: Document,
+        _complete_event: CompleteEvent,
+    ) -> Iterator[Completion]:
+        prefix = document.text_before_cursor.strip()
+        if not prefix.startswith("/") or " " in prefix:
+            return
+        for command in SLASH_COMMANDS:
+            if command.name.startswith(prefix.casefold()):
+                yield Completion(
+                    command.name,
+                    start_position=-len(prefix),
+                    display_meta=command.description,
+                )
+
+
+@dataclass
+class ConsoleSettings:
+    verbose: bool = False
 
 
 class ConsoleToolExecutor:
     """Run tools while showing concise progress in the terminal."""
 
-    def __init__(self, executor: ToolExecutor, output: TextIO = sys.stdout) -> None:
+    def __init__(
+        self,
+        executor: ToolExecutor,
+        output: TextIO = sys.stdout,
+        settings: ConsoleSettings | None = None,
+    ) -> None:
         self.executor = executor
         self.output = output
+        self.settings = settings or ConsoleSettings()
         self.step = 0
 
     def __call__(
@@ -49,37 +111,46 @@ class ConsoleToolExecutor:
     ) -> dict[str, Any]:
         self.step += 1
         detail = self._call_detail(arguments)
-        suffix = f": {detail}" if detail else ""
-        print(f"[{self.step}] TOOL  {name}{suffix}", file=self.output)
-
         result = self.executor(name, arguments)
-        self._show_result(name, result)
+        self._show_result(name, detail, result)
         return result
 
-    @staticmethod
-    def _call_detail(arguments: Mapping[str, Any]) -> str:
+    @classmethod
+    def _call_detail(cls, arguments: Mapping[str, Any]) -> str:
         path = arguments.get("path")
         if isinstance(path, str):
-            return path
+            return cls._shorten(path)
         command = arguments.get("command")
         if isinstance(command, (list, tuple)):
             parts = [str(part) for part in command]
             if parts and parts[0].casefold() == sys.executable.casefold():
                 parts[0] = "python"
-            return " ".join(parts)
+            return cls._shorten(" ".join(parts))
         return ""
 
-    def _show_result(self, name: str, result: Mapping[str, Any]) -> None:
+    def _show_result(
+        self,
+        name: str,
+        detail: str,
+        result: Mapping[str, Any],
+    ) -> None:
         success = result.get("success") is True
         marker = "OK" if success else "FAIL"
         content = result.get("content")
 
         command_details = None
         if name == "run_command" and isinstance(content, str):
-            command_details = self._show_command_output(content)
+            command_details = self._command_details(content)
 
         if command_details is not None:
-            summary = f"Command exited with code {command_details.get('exit_code')}."
+            summary = f"exit {command_details.get('exit_code')}"
+            duration = command_details.get("duration")
+            if isinstance(duration, (int, float)):
+                summary += f" | {duration:.2f}s"
+            if not success:
+                error_line = self._last_output_line(command_details)
+                if error_line:
+                    summary += f" | {self._shorten(error_line, 160)}"
         elif name == "list_files" and success:
             if content == "No files found.":
                 summary = content
@@ -91,24 +162,60 @@ class ConsoleToolExecutor:
         elif name == "search_text" and success:
             summary = "Search completed."
         elif isinstance(content, str) and content:
-            summary = content.splitlines()[0][:300]
+            summary = self._shorten(content.splitlines()[0], 200)
         else:
             summary = str(result.get("error_type") or "Tool completed.")
-        print(f"    {marker:<5} {summary}", file=self.output)
 
-    def _show_command_output(self, content: str) -> dict[str, Any] | None:
+        detail_text = f" {detail}" if detail else ""
+        print(
+            f"[{self.step}] {marker:<5} {name}{detail_text} | {summary}",
+            file=self.output,
+        )
+        if self.settings.verbose:
+            self._show_verbose_output(name, content, command_details)
+
+    @staticmethod
+    def _command_details(content: str) -> dict[str, Any] | None:
         try:
             details = json.loads(content)
         except json.JSONDecodeError:
             return None
         if not isinstance(details, dict):
             return None
+        return details
+
+    def _show_verbose_output(
+        self,
+        name: str,
+        content: Any,
+        command_details: dict[str, Any] | None,
+    ) -> None:
+        if name != "run_command" or command_details is None:
+            if isinstance(content, str) and content:
+                for line in content.rstrip().splitlines():
+                    print(f"    OUT   {line}", file=self.output)
+            return
+
         for stream_name, label in (("stdout", "OUT"), ("stderr", "ERR")):
-            stream = details.get(stream_name)
+            stream = command_details.get(stream_name)
             if isinstance(stream, str) and stream.strip():
                 for line in stream.rstrip().splitlines():
                     print(f"    {label:<5} {line}", file=self.output)
-        return details
+
+    @staticmethod
+    def _last_output_line(details: Mapping[str, Any]) -> str:
+        for stream_name in ("stderr", "stdout"):
+            stream = details.get(stream_name)
+            if isinstance(stream, str) and stream.strip():
+                return stream.strip().splitlines()[-1]
+        return ""
+
+    @staticmethod
+    def _shorten(text: str, max_chars: int = 120) -> str:
+        compact = " ".join(text.split())
+        if len(compact) <= max_chars:
+            return compact
+        return f"{compact[: max_chars - 3]}..."
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -131,6 +238,41 @@ def _parser() -> argparse.ArgumentParser:
         help="Maximum number of model steps (default: 10).",
     )
     return parser
+
+
+def _interactive_input(
+    input_fn: Callable[[str], str],
+) -> Callable[[str], str]:
+    if input_fn is not input or not sys.stdin.isatty():
+        return input_fn
+
+    task_session = _task_prompt_session(DEFAULT_HISTORY_FILE)
+    choice_session: PromptSession[str] = PromptSession()
+
+    def read(prompt: str) -> str:
+        session = task_session if prompt == "Task> " else choice_session
+        return session.prompt(prompt)
+
+    return read
+
+
+def _task_prompt_session(
+    history_file: Path,
+    *,
+    prompt_input: Input | None = None,
+    prompt_output: Output | None = None,
+) -> PromptSession[str]:
+    history_file.parent.mkdir(parents=True, exist_ok=True)
+    session: PromptSession[str]
+    session = PromptSession(
+        history=FileHistory(str(history_file)),
+        completer=SlashCommandCompleter(),
+        complete_while_typing=True,
+        complete_style=CompleteStyle.MULTI_COLUMN,
+        input=prompt_input,
+        output=prompt_output,
+    )
+    return session
 
 
 def _user_error_message(error: Exception) -> str:
@@ -164,6 +306,8 @@ def run_cli(
         model_client = ModelClient()
         session_store = SessionStore(DEFAULT_SESSION_DIRECTORY)
         memory_store = ProjectMemoryStore(DEFAULT_MEMORY_FILE)
+        console_settings = ConsoleSettings()
+        workspace_tracker = WorkspaceTracker(workspace)
         context_manager = ContextManager(
             DEFAULT_RESULT_DIRECTORY,
             on_auto_compaction=lambda before, after: print(
@@ -179,16 +323,16 @@ def run_cli(
             session,
             context_manager,
             output,
+            console_settings,
         )
 
-        print("Code Harness", file=output)
-        print("=" * 60, file=output)
-        print(f"Model:     {model_client.config.model_name}", file=output)
+        print(f"Code Harness | {model_client.config.model_name}", file=output)
         print(f"Workspace: {workspace}", file=output)
         print(f"Session:   {session.session_id}", file=output)
-        print("-" * 60, file=output)
 
         if initial_task:
+            workspace_tracker.start()
+            print(f"Task> {initial_task}", file=output)
             return _run_turn(
                 initial_task,
                 loop,
@@ -198,10 +342,11 @@ def run_cli(
                 _system_prompt(memory_store.items()),
             )
 
-        print("Commands: /resume  /compact  /memory  /remember  /exit", file=output)
+        read_input = _interactive_input(input_fn)
+        print("Commands: type / for help and completion", file=output)
         while True:
             try:
-                task = input_fn("Task> ").strip()
+                task = read_input("Task> ").strip()
             except (EOFError, KeyboardInterrupt):
                 print("\nSession saved.", file=output)
                 return 0
@@ -212,7 +357,7 @@ def run_cli(
                 selected = _select_session(
                     session_store,
                     session.session_id,
-                    input_fn,
+                    read_input,
                     output,
                 )
                 if selected is not None:
@@ -224,6 +369,7 @@ def run_cli(
                         session,
                         context_manager,
                         output,
+                        console_settings,
                     )
                     print(
                         f"Resumed: {session.display_title} "
@@ -244,6 +390,20 @@ def run_cli(
             if task.casefold() == "/memory":
                 _show_memory(memory_store, output)
                 continue
+            if task.casefold() in {"/", "/help"}:
+                _show_help(output)
+                continue
+            if task.casefold() == "/verbose":
+                console_settings.verbose = not console_settings.verbose
+                state = "on" if console_settings.verbose else "off"
+                print(f"Verbose tool output: {state}.", file=output)
+                continue
+            if task.casefold() == "/status":
+                _show_workspace_status(workspace_tracker, output)
+                continue
+            if task.casefold() == "/diff":
+                print(workspace_tracker.diff(), file=output)
+                continue
             if task.casefold() == "/remember" or task.casefold().startswith(
                 "/remember "
             ):
@@ -255,8 +415,12 @@ def run_cli(
                 else:
                     print("That note is already in project memory.", file=output)
                 continue
+            if task.startswith("/"):
+                print("Unknown command. Type /help to list commands.", file=output)
+                continue
             if not task:
                 continue
+            workspace_tracker.start()
             _run_turn(
                 task,
                 loop,
@@ -293,6 +457,36 @@ def _show_memory(store: ProjectMemoryStore, output: TextIO) -> None:
         print(f"  - {note}", file=output)
 
 
+def _show_help(output: TextIO) -> None:
+    print("Available commands", file=output)
+    width = max(len(command.usage) for command in SLASH_COMMANDS)
+    for command in SLASH_COMMANDS:
+        print(
+            f"  {command.usage:<{width}}  {command.description}",
+            file=output,
+        )
+
+
+def _show_workspace_status(tracker: WorkspaceTracker, output: TextIO) -> None:
+    if not tracker.started:
+        print("No task changes to show yet.", file=output)
+        return
+
+    changes = tracker.changes()
+    if changes.empty:
+        print("No workspace changes.", file=output)
+        return
+
+    print("Workspace changes", file=output)
+    for marker, paths in (
+        ("A", changes.added),
+        ("M", changes.modified),
+        ("D", changes.deleted),
+    ):
+        for path in paths:
+            print(f"  {marker} {path}", file=output)
+
+
 def _create_loop(
     model_client: ModelClient,
     workspace: Path,
@@ -300,12 +494,13 @@ def _create_loop(
     session: Session,
     context_manager: ContextManager,
     output: TextIO,
+    console_settings: ConsoleSettings | None = None,
 ) -> AgentLoop:
     executor = ToolExecutor(workspace)
     return AgentLoop(
         model_client,
         tools=executor.definitions,
-        tool_executor=ConsoleToolExecutor(executor, output),
+        tool_executor=ConsoleToolExecutor(executor, output, console_settings),
         max_steps=max_steps,
         history=session.messages,
         context_manager=context_manager,
@@ -392,7 +587,6 @@ def _run_turn(
 ) -> int:
     """Run and save one turn of a conversation."""
 
-    print(f"You: {task}", file=output)
     try:
         answer = loop.run(task, system_prompt=system_prompt)
     except AgentLoopError as exc:
@@ -405,9 +599,9 @@ def _run_turn(
     session.messages = loop.messages
     session.total_turns += 1
     session_store.save(session)
-    print("Agent:", file=output)
+    print("Agent>", file=output)
     print(answer or "(No final response.)", file=output)
-    print("-" * 60, file=output)
+    print(file=output)
     return 0
 
 
