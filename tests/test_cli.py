@@ -11,7 +11,7 @@ from prompt_toolkit.data_structures import Size
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.output.vt100 import Vt100_Output
 
-import main
+from cli import app as main
 from agent.loop import AgentLoopError
 from agent.model import ModelClientError
 
@@ -104,9 +104,9 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(selected, "/workspace")
         self.assertEqual(recalled, "/workspace")
 
-    @patch("main.AgentLoop")
-    @patch("main.ModelClient")
-    @patch("main.ToolExecutor")
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
     def test_runs_task_in_selected_workspace(
         self,
         executor_class: Mock,
@@ -123,7 +123,7 @@ class CommandLineTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             with patch(
-                "main.DEFAULT_SESSION_DIRECTORY",
+                "cli.app.DEFAULT_SESSION_DIRECTORY",
                 Path(temporary_directory) / "sessions",
             ):
                 exit_code = main.run_cli(
@@ -155,9 +155,9 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn("Task> Fix the failing test", displayed)
         self.assertIn("Agent>\nFinished.", displayed)
 
-    @patch("main.AgentLoop")
-    @patch("main.ModelClient")
-    @patch("main.ToolExecutor")
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
     def test_attaches_referenced_file_to_task(
         self,
         executor_class: Mock,
@@ -178,7 +178,7 @@ class CommandLineTests(unittest.TestCase):
                 encoding="utf-8",
             )
             with patch(
-                "main.DEFAULT_SESSION_DIRECTORY",
+                "cli.app.DEFAULT_SESSION_DIRECTORY",
                 workspace / "sessions",
             ):
                 exit_code = main.run_cli(
@@ -197,9 +197,9 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn("[Referenced file: notes.txt]\nimportant context", prompt)
         self.assertIn("[context] Attached 1 file(s).", output.getvalue())
 
-    @patch("main.AgentLoop")
-    @patch("main.ModelClient")
-    @patch("main.ToolExecutor")
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
     def test_prompts_for_task_when_not_given_as_an_argument(
         self,
         executor_class: Mock,
@@ -215,7 +215,7 @@ class CommandLineTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             with patch(
-                "main.DEFAULT_SESSION_DIRECTORY",
+                "cli.app.DEFAULT_SESSION_DIRECTORY",
                 Path(temporary_directory) / "sessions",
             ):
                 exit_code = main.run_cli(
@@ -236,9 +236,9 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         self.assertIn("Session saved.", output.getvalue())
 
-    @patch("main.AgentLoop")
-    @patch("main.ModelClient")
-    @patch("main.ToolExecutor")
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
     def test_plan_accepts_feedback_then_acts_on_revised_plan(
         self,
         executor_class: Mock,
@@ -286,7 +286,7 @@ class CommandLineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             workspace = Path(temporary_directory).resolve()
             with patch(
-                "main.DEFAULT_SESSION_DIRECTORY",
+                "cli.app.DEFAULT_SESSION_DIRECTORY",
                 workspace / "sessions",
             ):
                 exit_code = main.run_cli(
@@ -325,9 +325,9 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn("Give more feedback, or use /act", displayed)
         self.assertIn("Agent>\nImplemented.", displayed)
 
-    @patch("main.AgentLoop")
-    @patch("main.ModelClient")
-    @patch("main.ToolExecutor")
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
     def test_act_without_plan_shows_guidance(
         self,
         executor_class: Mock,
@@ -342,7 +342,7 @@ class CommandLineTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             with patch(
-                "main.DEFAULT_SESSION_DIRECTORY",
+                "cli.app.DEFAULT_SESSION_DIRECTORY",
                 Path(temporary_directory) / "sessions",
             ):
                 exit_code = main.run_cli(
@@ -355,9 +355,9 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn("No plan to execute", output.getvalue())
         loop_class.return_value.run.assert_not_called()
 
-    @patch("main.AgentLoop")
-    @patch("main.ModelClient")
-    @patch("main.ToolExecutor")
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
     def test_cancel_leaves_plan_mode_without_executing(
         self,
         executor_class: Mock,
@@ -382,7 +382,7 @@ class CommandLineTests(unittest.TestCase):
         output = io.StringIO()
         with tempfile.TemporaryDirectory() as temporary_directory:
             with patch(
-                "main.DEFAULT_SESSION_DIRECTORY",
+                "cli.app.DEFAULT_SESSION_DIRECTORY",
                 Path(temporary_directory) / "sessions",
             ):
                 exit_code = main.run_cli(
@@ -397,9 +397,9 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn("No plan to execute", output.getvalue())
         normal_loop.run.assert_not_called()
 
-    @patch("main.AgentLoop")
-    @patch("main.ModelClient")
-    @patch("main.ToolExecutor")
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
     def test_resume_command_lists_and_switches_session(
         self,
         executor_class: Mock,
@@ -425,7 +425,7 @@ class CommandLineTests(unittest.TestCase):
             ]
             store.save(saved)
 
-            with patch("main.DEFAULT_SESSION_DIRECTORY", session_directory):
+            with patch("cli.app.DEFAULT_SESSION_DIRECTORY", session_directory):
                 exit_code = main.run_cli(
                     ["--workspace", temporary_directory],
                     input_fn=lambda prompt: next(inputs),
@@ -443,10 +443,10 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn("Build a calculator", displayed)
         self.assertIn("Resumed: Build a calculator", displayed)
 
-    @patch("main.ContextManager")
-    @patch("main.AgentLoop")
-    @patch("main.ModelClient")
-    @patch("main.ToolExecutor")
+    @patch("cli.app.ContextManager")
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
     def test_compact_command_replaces_and_saves_history(
         self,
         executor_class: Mock,
@@ -472,7 +472,7 @@ class CommandLineTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             session_directory = Path(temporary_directory) / "sessions"
-            with patch("main.DEFAULT_SESSION_DIRECTORY", session_directory):
+            with patch("cli.app.DEFAULT_SESSION_DIRECTORY", session_directory):
                 exit_code = main.run_cli(
                     ["--workspace", temporary_directory],
                     input_fn=lambda prompt: next(inputs),
@@ -489,9 +489,9 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(saved.turn_count, 1)
         self.assertIn("Compacted context: 500 -> 100 characters.", output.getvalue())
 
-    @patch("main.AgentLoop")
-    @patch("main.ModelClient")
-    @patch("main.ToolExecutor")
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
     def test_memory_commands_persist_and_inject_note(
         self,
         executor_class: Mock,
@@ -516,8 +516,8 @@ class CommandLineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             with (
-                patch("main.DEFAULT_SESSION_DIRECTORY", root / "sessions"),
-                patch("main.DEFAULT_PROJECT_DIRECTORY", root / "projects"),
+                patch("cli.app.DEFAULT_SESSION_DIRECTORY", root / "sessions"),
+                patch("cli.app.DEFAULT_PROJECT_DIRECTORY", root / "projects"),
             ):
                 memory_file = main._memory_file_for_workspace(root)
                 exit_code = main.run_cli(
@@ -535,9 +535,9 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn("Project memory updated.", displayed)
         self.assertIn("  - Use pytest for tests.", displayed)
 
-    @patch("main.AgentLoop")
-    @patch("main.ModelClient")
-    @patch("main.ToolExecutor")
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
     def test_open_switches_workspace_and_resets_status(
         self,
         executor_class: Mock,
@@ -571,8 +571,8 @@ class CommandLineTests(unittest.TestCase):
                 ]
             )
             with (
-                patch("main.DEFAULT_SESSION_DIRECTORY", root / "sessions"),
-                patch("main.DEFAULT_PROJECT_DIRECTORY", root / "projects"),
+                patch("cli.app.DEFAULT_SESSION_DIRECTORY", root / "sessions"),
+                patch("cli.app.DEFAULT_PROJECT_DIRECTORY", root / "projects"),
             ):
                 exit_code = main.run_cli(
                     ["--workspace", str(first_workspace)],
@@ -601,7 +601,7 @@ class CommandLineTests(unittest.TestCase):
     def test_workspace_memory_paths_are_isolated(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            with patch("main.DEFAULT_PROJECT_DIRECTORY", root / "state"):
+            with patch("cli.app.DEFAULT_PROJECT_DIRECTORY", root / "state"):
                 first = main._memory_file_for_workspace(root / "first")
                 second = main._memory_file_for_workspace(root / "second")
 
@@ -675,9 +675,9 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn("    OUT   starting", displayed)
         self.assertIn("    ERR   line 1\n    ERR   SyntaxError", displayed)
 
-    @patch("main.AgentLoop")
-    @patch("main.ModelClient")
-    @patch("main.ToolExecutor")
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
     def test_verbose_status_and_diff_commands(
         self,
         executor_class: Mock,
@@ -704,7 +704,7 @@ class CommandLineTests(unittest.TestCase):
                 ["/verbose", "Create hello.py", "/status", "/diff", "/exit"]
             )
             with patch(
-                "main.DEFAULT_SESSION_DIRECTORY",
+                "cli.app.DEFAULT_SESSION_DIRECTORY",
                 workspace / "sessions",
             ):
                 exit_code = main.run_cli(
@@ -721,9 +721,9 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn("+++ b/hello.py", displayed)
         self.assertIn('+print("hello")', displayed)
 
-    @patch("main.AgentLoop")
-    @patch("main.ModelClient")
-    @patch("main.ToolExecutor")
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
     def test_help_lists_commands_and_rejects_unknown_command(
         self,
         executor_class: Mock,
@@ -738,7 +738,7 @@ class CommandLineTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             with patch(
-                "main.DEFAULT_SESSION_DIRECTORY",
+                "cli.app.DEFAULT_SESSION_DIRECTORY",
                 Path(temporary_directory) / "sessions",
             ):
                 exit_code = main.run_cli(
@@ -758,9 +758,9 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn(sys.executable, main.SYSTEM_PROMPT)
         self.assertIn("Do not use python3", main.SYSTEM_PROMPT)
 
-    @patch("main.AgentLoop")
-    @patch("main.ModelClient")
-    @patch("main.ToolExecutor")
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
     def test_displays_model_error_instead_of_generic_loop_error(
         self,
         executor_class: Mock,
@@ -778,7 +778,7 @@ class CommandLineTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             with patch(
-                "main.DEFAULT_SESSION_DIRECTORY",
+                "cli.app.DEFAULT_SESSION_DIRECTORY",
                 Path(temporary_directory) / "sessions",
             ):
                 exit_code = main.run_cli(
