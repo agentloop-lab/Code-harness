@@ -43,22 +43,43 @@ TOOL_HANDLERS = {
     "run_command": run_command,
 }
 
+READ_ONLY_TOOLS = frozenset({"list_files", "read_file", "search_text"})
+
 
 class ToolExecutor:
     """Execute the tools available for one workspace."""
 
-    def __init__(self, workspace: str | Path) -> None:
+    def __init__(
+        self,
+        workspace: str | Path,
+        allowed_tools: set[str] | frozenset[str] | None = None,
+    ) -> None:
         self.workspace = Path(workspace).resolve()
+        self.allowed_tools = (
+            frozenset(allowed_tools)
+            if allowed_tools is not None
+            else frozenset(TOOL_HANDLERS)
+        )
         self._file_versions: dict[Path, str] = {}
 
     @property
     def definitions(self) -> list[dict[str, Any]]:
-        return list(TOOL_DEFINITIONS)
+        return [
+            definition
+            for definition in TOOL_DEFINITIONS
+            if definition["function"]["name"] in self.allowed_tools
+        ]
 
     def __call__(self, name: str, arguments: Mapping[str, Any]) -> dict[str, Any]:
         handler = TOOL_HANDLERS.get(name)
         if handler is None:
             return ToolResult(False, f"Unknown tool: {name}", "UnknownTool").to_dict()
+        if name not in self.allowed_tools:
+            return ToolResult(
+                False,
+                f"Tool is not available in the current mode: {name}",
+                "ToolUnavailable",
+            ).to_dict()
         if not isinstance(arguments, Mapping):
             return ToolResult(
                 False,

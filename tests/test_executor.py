@@ -4,6 +4,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tools import ToolExecutor
+from tools.executor import READ_ONLY_TOOLS
 
 
 class ToolExecutorTests(unittest.TestCase):
@@ -21,6 +22,20 @@ class ToolExecutorTests(unittest.TestCase):
 
         self.assertFalse(result["success"])
         self.assertEqual(result["error_type"], "UnknownTool")
+
+    def test_read_only_executor_hides_and_rejects_write_tools(self) -> None:
+        executor = ToolExecutor(self.workspace, allowed_tools=READ_ONLY_TOOLS)
+
+        names = {
+            definition["function"]["name"]
+            for definition in executor.definitions
+        }
+        result = executor("write_file", {"path": "new.py", "content": ""})
+
+        self.assertEqual(names, READ_ONLY_TOOLS)
+        self.assertFalse(result["success"])
+        self.assertEqual(result["error_type"], "ToolUnavailable")
+        self.assertFalse((self.workspace / "new.py").exists())
 
     def test_returns_error_for_missing_arguments(self) -> None:
         result = self.executor("read_file", {})

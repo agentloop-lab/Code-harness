@@ -239,6 +239,167 @@ class CommandLineTests(unittest.TestCase):
     @patch("main.AgentLoop")
     @patch("main.ModelClient")
     @patch("main.ToolExecutor")
+    def test_plan_accepts_feedback_then_acts_on_revised_plan(
+        self,
+        executor_class: Mock,
+        model_class: Mock,
+        loop_class: Mock,
+    ) -> None:
+        full_executor = Mock(definitions=[{"name": "full"}])
+        plan_executor = Mock(definitions=[{"name": "read-only"}])
+        executor_class.side_effect = [full_executor, plan_executor]
+        model_class.return_value.config.model_name = "test-model"
+
+        full_loop = Mock(messages=[])
+        full_loop.run.return_value = "Implemented."
+        planning_loop = Mock(messages=[])
+
+        def return_plan(task: str, **kwargs: object) -> str:
+            content = (
+                "1. Update app.py"
+                if planning_loop.run.call_count == 1
+                else "1. Update app.py without dependencies"
+            )
+            planning_loop.messages.append(
+                {"role": "assistant", "content": content}
+            )
+            return content
+
+        planning_loop.run.side_effect = return_plan
+        loop_class.side_effect = [full_loop, planning_loop]
+        inputs = iter(
+            [
+                "/plan add validation",
+                "Do not add dependencies",
+                "/act",
+                "/exit",
+            ]
+        )
+        prompts: list[str] = []
+
+        def read_input(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(inputs)
+
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory).resolve()
+            with patch(
+                "main.DEFAULT_SESSION_DIRECTORY",
+                workspace / "sessions",
+            ):
+                exit_code = main.run_cli(
+                    ["--workspace", temporary_directory],
+                    input_fn=read_input,
+                    output=output,
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            executor_class.call_args_list,
+            [
+                unittest.mock.call(workspace),
+                unittest.mock.call(
+                    workspace,
+                    allowed_tools=main.READ_ONLY_TOOLS,
+                ),
+            ],
+        )
+        self.assertEqual(loop_class.call_args_list[1].kwargs["tools"], plan_executor.definitions)
+        self.assertEqual(planning_loop.run.call_count, 2)
+        planning_loop.run.assert_any_call(
+            "add validation", system_prompt=main.PLAN_SYSTEM_PROMPT
+        )
+        revision_task = planning_loop.run.call_args.args[0]
+        self.assertIn("Revise the current plan", revision_task)
+        self.assertIn("Do not add dependencies", revision_task)
+        act_task = full_loop.run.call_args.args[0]
+        self.assertIn("Execute the approved plan", act_task)
+        self.assertIn("1. Update app.py without dependencies", act_task)
+        self.assertEqual(prompts, ["Task> ", "Plan> ", "Plan> ", "Task> "])
+        displayed = output.getvalue()
+        self.assertIn("Plan>\n1. Update app.py", displayed)
+        self.assertIn("Plan>\n1. Update app.py without dependencies", displayed)
+        self.assertIn("Give feedback to revise it, or use /act", displayed)
+        self.assertIn("Give more feedback, or use /act", displayed)
+        self.assertIn("Agent>\nImplemented.", displayed)
+
+    @patch("main.AgentLoop")
+    @patch("main.ModelClient")
+    @patch("main.ToolExecutor")
+    def test_act_without_plan_shows_guidance(
+        self,
+        executor_class: Mock,
+        model_class: Mock,
+        loop_class: Mock,
+    ) -> None:
+        executor_class.return_value.definitions = []
+        model_class.return_value.config.model_name = "test-model"
+        loop_class.return_value.messages = []
+        inputs = iter(["/act", "/exit"])
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with patch(
+                "main.DEFAULT_SESSION_DIRECTORY",
+                Path(temporary_directory) / "sessions",
+            ):
+                exit_code = main.run_cli(
+                    ["--workspace", temporary_directory],
+                    input_fn=lambda prompt: next(inputs),
+                    output=output,
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIn("No plan to execute", output.getvalue())
+        loop_class.return_value.run.assert_not_called()
+
+    @patch("main.AgentLoop")
+    @patch("main.ModelClient")
+    @patch("main.ToolExecutor")
+    def test_cancel_leaves_plan_mode_without_executing(
+        self,
+        executor_class: Mock,
+        model_class: Mock,
+        loop_class: Mock,
+    ) -> None:
+        executor_class.return_value.definitions = []
+        model_class.return_value.config.model_name = "test-model"
+        normal_loop = Mock(messages=[])
+        planning_loop = Mock(
+            messages=[{"role": "assistant", "content": "Draft plan"}]
+        )
+        planning_loop.run.return_value = "Draft plan"
+        loop_class.side_effect = [normal_loop, planning_loop]
+        inputs = iter(["/plan inspect app", "/cancel", "/act", "/exit"])
+        prompts: list[str] = []
+
+        def read_input(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(inputs)
+
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with patch(
+                "main.DEFAULT_SESSION_DIRECTORY",
+                Path(temporary_directory) / "sessions",
+            ):
+                exit_code = main.run_cli(
+                    ["--workspace", temporary_directory],
+                    input_fn=read_input,
+                    output=output,
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(prompts, ["Task> ", "Plan> ", "Task> ", "Task> "])
+        self.assertIn("Plan cancelled.", output.getvalue())
+        self.assertIn("No plan to execute", output.getvalue())
+        normal_loop.run.assert_not_called()
+
+    @patch("main.AgentLoop")
+    @patch("main.ModelClient")
+    @patch("main.ToolExecutor")
     def test_resume_command_lists_and_switches_session(
         self,
         executor_class: Mock,

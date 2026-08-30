@@ -33,6 +33,7 @@ from agent.model import ModelClient, ModelClientError, ModelConfigError
 from agent.session import Session, SessionError, SessionStore
 from agent.workspace import WorkspaceTracker
 from tools import ToolExecutor, read_file
+from tools.executor import READ_ONLY_TOOLS
 
 
 SYSTEM_PROMPT = (
@@ -44,6 +45,14 @@ SYSTEM_PROMPT = (
     "include -B when running Python commands to avoid bytecode cache files. "
     "Do not use python3 or another Python executable. Briefly summarize the "
     "result in your final answer."
+)
+PLAN_SYSTEM_PROMPT = (
+    "You are a coding agent in Plan Mode. Work only inside the provided "
+    "workspace. Explore the code with the available read-only tools, but do "
+    "not modify files or run commands. Identify the relevant files and "
+    "constraints, then return a concise, actionable implementation plan. "
+    "When the user gives feedback, revise and return the full plan. "
+    "Do not claim that the plan has been implemented."
 )
 DEFAULT_SESSION_DIRECTORY = Path(".agent/sessions")
 DEFAULT_RESULT_DIRECTORY = Path(".agent/results")
@@ -74,6 +83,9 @@ SLASH_COMMANDS = (
     SlashCommand("/verbose", "/verbose", "Toggle full tool output"),
     SlashCommand("/status", "/status", "Show latest workspace changes"),
     SlashCommand("/diff", "/diff", "Show latest code changes"),
+    SlashCommand("/plan", "/plan <task>", "Explore and create a read-only plan"),
+    SlashCommand("/act", "/act", "Execute the latest plan"),
+    SlashCommand("/cancel", "/cancel", "Discard the current plan"),
     SlashCommand("/help", "/help", "Show available commands"),
     SlashCommand("/exit", "/exit", "Save the session and exit"),
 )
@@ -303,7 +315,11 @@ def _interactive_input(
     choice_session: PromptSession[str] = PromptSession()
 
     def read(prompt: str) -> str:
-        session = task_session if prompt == "Task> " else choice_session
+        session = (
+            task_session
+            if prompt in {"Task> ", "Plan> "}
+            else choice_session
+        )
         return session.prompt(prompt)
 
     return read
@@ -414,6 +430,8 @@ def run_cli(
             ),
         )
         session = session_store.create(workspace)
+        pending_plan: str | None = None
+        planning_loop: AgentLoop | None = None
         loop = _create_loop(
             model_client,
             workspace,
@@ -453,7 +471,8 @@ def run_cli(
         print("Commands: type / for help and completion", file=output)
         while True:
             try:
-                task = read_input("Task> ").strip()
+                prompt = "Plan> " if planning_loop is not None else "Task> "
+                task = read_input(prompt).strip()
             except (EOFError, KeyboardInterrupt):
                 print("\nSession saved.", file=output)
                 return 0
@@ -485,6 +504,8 @@ def run_cli(
                     _memory_file_for_workspace(workspace)
                 )
                 workspace_tracker = WorkspaceTracker(workspace)
+                pending_plan = None
+                planning_loop = None
                 session = session_store.create(workspace)
                 loop = _create_loop(
                     model_client,
@@ -507,6 +528,8 @@ def run_cli(
                     output,
                 )
                 if selected is not None:
+                    pending_plan = None
+                    planning_loop = None
                     session = selected
                     loop = _create_loop(
                         model_client,
@@ -527,11 +550,13 @@ def run_cli(
                 _compact_session(
                     context_manager,
                     model_client,
-                    loop,
+                    planning_loop or loop,
                     session,
                     session_store,
                     output,
                 )
+                if planning_loop is not None:
+                    loop.messages = planning_loop.messages
                 continue
             if task.casefold() == "/memory":
                 _show_memory(memory_store, output)
@@ -550,6 +575,83 @@ def run_cli(
             if task.casefold() == "/diff":
                 print(workspace_tracker.diff(), file=output)
                 continue
+            if task.casefold() == "/cancel":
+                if planning_loop is None and not pending_plan:
+                    print("No active plan.", file=output)
+                else:
+                    planning_loop = None
+                    pending_plan = None
+                    print("Plan cancelled.", file=output)
+                continue
+            if task.casefold() == "/plan" or task.casefold().startswith(
+                "/plan "
+            ):
+                plan_task = task[len("/plan") :].strip()
+                if not plan_task:
+                    print("Usage: /plan <task>", file=output)
+                    continue
+                try:
+                    agent_task, references = _attach_file_references(
+                        plan_task,
+                        workspace,
+                    )
+                except ValueError as exc:
+                    print(f"Error: {exc}", file=output)
+                    continue
+                if references:
+                    print(
+                        f"[context] Attached {len(references)} file(s).",
+                        file=output,
+                    )
+                planning_loop = _create_loop(
+                    model_client,
+                    workspace,
+                    args.max_steps,
+                    session,
+                    context_manager,
+                    output,
+                    console_settings,
+                    allowed_tools=READ_ONLY_TOOLS,
+                )
+                result = _run_turn(
+                    agent_task,
+                    planning_loop,
+                    session,
+                    session_store,
+                    output,
+                    _planning_system_prompt(memory_store.items()),
+                    answer_label="Plan>",
+                )
+                loop.messages = planning_loop.messages
+                if result == 0:
+                    last_message = planning_loop.messages[-1]
+                    content = last_message.get("content")
+                    pending_plan = content if isinstance(content, str) else ""
+                    print(
+                        "Give feedback to revise it, or use /act to execute.",
+                        file=output,
+                    )
+                else:
+                    planning_loop = None
+                continue
+            if task.casefold() == "/act":
+                if not pending_plan:
+                    print("No plan to execute. Use /plan <task> first.", file=output)
+                    continue
+                planning_loop = None
+                workspace_tracker.start()
+                result = _run_turn(
+                    "Execute the approved plan below. Inspect files again if "
+                    f"needed, make the changes, and verify them.\n\n{pending_plan}",
+                    loop,
+                    session,
+                    session_store,
+                    output,
+                    _system_prompt(memory_store.items()),
+                )
+                if result == 0:
+                    pending_plan = None
+                continue
             if task.casefold() == "/remember" or task.casefold().startswith(
                 "/remember "
             ):
@@ -566,6 +668,41 @@ def run_cli(
                 continue
             if not task:
                 continue
+            if planning_loop is not None:
+                try:
+                    feedback, references = _attach_file_references(
+                        task,
+                        workspace,
+                    )
+                except ValueError as exc:
+                    print(f"Error: {exc}", file=output)
+                    continue
+                if references:
+                    print(
+                        f"[context] Attached {len(references)} file(s).",
+                        file=output,
+                    )
+                result = _run_turn(
+                    "Revise the current plan based on this user feedback. "
+                    "Continue to use only read-only tools and return the full "
+                    f"updated plan.\n\nFeedback:\n{feedback}",
+                    planning_loop,
+                    session,
+                    session_store,
+                    output,
+                    _planning_system_prompt(memory_store.items()),
+                    answer_label="Plan>",
+                )
+                loop.messages = planning_loop.messages
+                if result == 0:
+                    last_message = planning_loop.messages[-1]
+                    content = last_message.get("content")
+                    pending_plan = content if isinstance(content, str) else ""
+                    print(
+                        "Give more feedback, or use /act to execute.",
+                        file=output,
+                    )
+                continue
             try:
                 agent_task, references = _attach_file_references(
                     task,
@@ -579,6 +716,7 @@ def run_cli(
                     f"[context] Attached {len(references)} file(s).",
                     file=output,
                 )
+            pending_plan = None
             workspace_tracker.start()
             _run_turn(
                 agent_task,
@@ -604,6 +742,13 @@ def _system_prompt(memory: Sequence[str]) -> str:
         return SYSTEM_PROMPT
     notes = "\n".join(f"- {item}" for item in memory)
     return f"{SYSTEM_PROMPT}\n\nProject memory:\n{notes}"
+
+
+def _planning_system_prompt(memory: Sequence[str]) -> str:
+    if not memory:
+        return PLAN_SYSTEM_PROMPT
+    notes = "\n".join(f"- {item}" for item in memory)
+    return f"{PLAN_SYSTEM_PROMPT}\n\nProject memory:\n{notes}"
 
 
 def _show_memory(store: ProjectMemoryStore, output: TextIO) -> None:
@@ -654,8 +799,13 @@ def _create_loop(
     context_manager: ContextManager,
     output: TextIO,
     console_settings: ConsoleSettings | None = None,
+    allowed_tools: set[str] | frozenset[str] | None = None,
 ) -> AgentLoop:
-    executor = ToolExecutor(workspace)
+    executor = (
+        ToolExecutor(workspace, allowed_tools=allowed_tools)
+        if allowed_tools is not None
+        else ToolExecutor(workspace)
+    )
     return AgentLoop(
         model_client,
         tools=executor.definitions,
@@ -744,6 +894,7 @@ def _run_turn(
     session_store: SessionStore,
     output: TextIO,
     system_prompt: str = SYSTEM_PROMPT,
+    answer_label: str = "Agent>",
 ) -> int:
     """Run and save one turn of a conversation."""
 
@@ -759,7 +910,7 @@ def _run_turn(
     session.messages = loop.messages
     session.total_turns += 1
     session_store.save(session)
-    print("Agent>", file=output)
+    print(answer_label, file=output)
     print(answer or "(No final response.)", file=output)
     print(file=output)
     return 0
