@@ -33,6 +33,17 @@ class CommandLineTests(unittest.TestCase):
         )
         self.assertEqual(task_matches, [])
 
+    def test_completes_open_directory(self) -> None:
+        completer = main.SlashCommandCompleter()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            (root / "project-one").mkdir()
+            document = Document(f"/open {root / 'pro'}")
+
+            matches = list(completer.get_completions(document, Mock()))
+
+        self.assertIn("ject-one", [completion.text for completion in matches])
+
     def test_renders_and_selects_slash_commands(self) -> None:
         async def run_prompt(history_file: Path) -> tuple[str, str, str]:
             capture = io.StringIO()
@@ -51,7 +62,7 @@ class CommandLineTests(unittest.TestCase):
                 await asyncio.sleep(0.05)
                 pipe.send_text("/")
                 for _ in range(100):
-                    if "/status" in capture.getvalue():
+                    if "/workspace" in capture.getvalue():
                         break
                     await asyncio.sleep(0.01)
                 rendered = capture.getvalue()
@@ -72,9 +83,9 @@ class CommandLineTests(unittest.TestCase):
                 run_prompt(Path(temporary_directory) / "history")
             )
 
-        self.assertIn("/status", rendered)
-        self.assertEqual(selected, "/resume")
-        self.assertEqual(recalled, "/resume")
+        self.assertIn("/workspace", rendered)
+        self.assertEqual(selected, "/workspace")
+        self.assertEqual(recalled, "/workspace")
 
     @patch("main.AgentLoop")
     @patch("main.ModelClient")
@@ -187,7 +198,7 @@ class CommandLineTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             session_directory = Path(temporary_directory) / "sessions"
             store = main.SessionStore(session_directory)
-            saved = store.create()
+            saved = store.create(Path(temporary_directory))
             saved.messages = [
                 {"role": "user", "content": "Build a calculator"},
                 {"role": "assistant", "content": "Created it"},
@@ -286,14 +297,15 @@ class CommandLineTests(unittest.TestCase):
             root = Path(temporary_directory)
             with (
                 patch("main.DEFAULT_SESSION_DIRECTORY", root / "sessions"),
-                patch("main.DEFAULT_MEMORY_FILE", root / "memory.md"),
+                patch("main.DEFAULT_PROJECT_DIRECTORY", root / "projects"),
             ):
+                memory_file = main._memory_file_for_workspace(root)
                 exit_code = main.run_cli(
                     ["--workspace", temporary_directory],
                     input_fn=lambda prompt: next(inputs),
                     output=output,
                 )
-            notes = main.ProjectMemoryStore(root / "memory.md").items()
+            notes = main.ProjectMemoryStore(memory_file).items()
 
         self.assertEqual(exit_code, 0)
         self.assertEqual(notes, ["Use pytest for tests."])
@@ -302,6 +314,80 @@ class CommandLineTests(unittest.TestCase):
         displayed = output.getvalue()
         self.assertIn("Project memory updated.", displayed)
         self.assertIn("  - Use pytest for tests.", displayed)
+
+    @patch("main.AgentLoop")
+    @patch("main.ModelClient")
+    @patch("main.ToolExecutor")
+    def test_open_switches_workspace_and_resets_status(
+        self,
+        executor_class: Mock,
+        model_class: Mock,
+        loop_class: Mock,
+    ) -> None:
+        executor_class.return_value.definitions = []
+        model_class.return_value.config.model_name = "test-model"
+        first_loop = Mock(messages=[{"role": "user", "content": "First task"}])
+        first_loop.run.return_value = "Done."
+        second_loop = Mock(messages=[])
+        loop_class.side_effect = [first_loop, second_loop]
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            first_workspace = root / "first"
+            second_workspace = root / "second"
+            first_workspace.mkdir()
+            second_workspace.mkdir()
+            inputs = iter(
+                [
+                    "/remember First workspace note.",
+                    "First task",
+                    f"/open {root / 'missing'}",
+                    f"/open {second_workspace}",
+                    "/workspace",
+                    "/memory",
+                    "/status",
+                    "/exit",
+                ]
+            )
+            with (
+                patch("main.DEFAULT_SESSION_DIRECTORY", root / "sessions"),
+                patch("main.DEFAULT_PROJECT_DIRECTORY", root / "projects"),
+            ):
+                exit_code = main.run_cli(
+                    ["--workspace", str(first_workspace)],
+                    input_fn=lambda prompt: next(inputs),
+                    output=output,
+                )
+            first_sessions = main.SessionStore(root / "sessions").list_recent(
+                workspace=first_workspace
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            executor_class.call_args_list,
+            [
+                unittest.mock.call(first_workspace.resolve()),
+                unittest.mock.call(second_workspace.resolve()),
+            ],
+        )
+        self.assertEqual(len(first_sessions), 1)
+        displayed = output.getvalue()
+        self.assertIn("Workspace does not exist:", displayed)
+        self.assertIn(f"Workspace: {second_workspace.resolve()}", displayed)
+        self.assertIn("Project memory is empty.", displayed)
+        self.assertIn("No task changes to show yet.", displayed)
+
+    def test_workspace_memory_paths_are_isolated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            with patch("main.DEFAULT_PROJECT_DIRECTORY", root / "state"):
+                first = main._memory_file_for_workspace(root / "first")
+                second = main._memory_file_for_workspace(root / "second")
+
+        self.assertNotEqual(first, second)
+        self.assertEqual(first.parent.parent, root / "state")
+        self.assertEqual(second.parent.parent, root / "state")
 
     def test_console_executor_displays_tool_progress(self) -> None:
         executor = Mock(

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
@@ -12,7 +13,12 @@ from pathlib import Path
 from typing import Any, TextIO
 
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import CompleteEvent, Completer, Completion
+from prompt_toolkit.completion import (
+    CompleteEvent,
+    Completer,
+    Completion,
+    PathCompleter,
+)
 from prompt_toolkit.document import Document
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.input import Input
@@ -41,6 +47,7 @@ SYSTEM_PROMPT = (
 DEFAULT_SESSION_DIRECTORY = Path(".agent/sessions")
 DEFAULT_RESULT_DIRECTORY = Path(".agent/results")
 DEFAULT_MEMORY_FILE = Path(".agent/memory.md")
+DEFAULT_PROJECT_DIRECTORY = Path(".agent/projects")
 DEFAULT_HISTORY_FILE = Path(".agent/history")
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 
@@ -53,6 +60,8 @@ class SlashCommand:
 
 
 SLASH_COMMANDS = (
+    SlashCommand("/workspace", "/workspace", "Show current workspace"),
+    SlashCommand("/open", "/open <path>", "Switch workspace"),
     SlashCommand("/resume", "/resume", "Resume a saved session"),
     SlashCommand("/compact", "/compact", "Compact conversation context"),
     SlashCommand("/memory", "/memory", "Show project memory"),
@@ -68,12 +77,27 @@ SLASH_COMMANDS = (
 class SlashCommandCompleter(Completer):
     """Complete slash commands at the start of a task prompt."""
 
+    def __init__(self) -> None:
+        self._path_completer = PathCompleter(
+            only_directories=True,
+            expanduser=True,
+        )
+
     def get_completions(
         self,
         document: Document,
         _complete_event: CompleteEvent,
     ) -> Iterator[Completion]:
-        prefix = document.text_before_cursor.strip()
+        text = document.text_before_cursor
+        if text.casefold().startswith("/open "):
+            path_text = text[len("/open ") :]
+            yield from self._path_completer.get_completions(
+                Document(path_text, cursor_position=len(path_text)),
+                _complete_event,
+            )
+            return
+
+        prefix = text.strip()
         if not prefix.startswith("/") or " " in prefix:
             return
         for command in SLASH_COMMANDS:
@@ -286,6 +310,16 @@ def _user_error_message(error: Exception) -> str:
     return str(error)
 
 
+def _memory_file_for_workspace(workspace: Path) -> Path:
+    resolved = workspace.resolve()
+    if resolved == Path("workspace").resolve():
+        return DEFAULT_MEMORY_FILE
+    key = hashlib.sha256(
+        str(resolved).casefold().encode("utf-8")
+    ).hexdigest()[:16]
+    return DEFAULT_PROJECT_DIRECTORY / key / "memory.md"
+
+
 def run_cli(
     argv: Sequence[str] | None = None,
     *,
@@ -305,7 +339,7 @@ def run_cli(
 
         model_client = ModelClient()
         session_store = SessionStore(DEFAULT_SESSION_DIRECTORY)
-        memory_store = ProjectMemoryStore(DEFAULT_MEMORY_FILE)
+        memory_store = ProjectMemoryStore(_memory_file_for_workspace(workspace))
         console_settings = ConsoleSettings()
         workspace_tracker = WorkspaceTracker(workspace)
         context_manager = ContextManager(
@@ -315,7 +349,7 @@ def run_cli(
                 file=output,
             ),
         )
-        session = session_store.create()
+        session = session_store.create(workspace)
         loop = _create_loop(
             model_client,
             workspace,
@@ -353,10 +387,49 @@ def run_cli(
             if task.casefold() in EXIT_COMMANDS:
                 print("Session saved.", file=output)
                 return 0
+            if task.casefold() == "/workspace":
+                print(f"Workspace: {workspace}", file=output)
+                continue
+            if task.casefold() == "/open" or task.casefold().startswith(
+                "/open "
+            ):
+                path_text = task[len("/open") :].strip()
+                if not path_text:
+                    print("Usage: /open <path>", file=output)
+                    continue
+                target = Path(path_text).expanduser().resolve()
+                if not target.exists():
+                    print(f"Workspace does not exist: {target}", file=output)
+                    continue
+                if not target.is_dir():
+                    print(f"Workspace is not a directory: {target}", file=output)
+                    continue
+                if session.messages:
+                    session.messages = loop.messages
+                    session_store.save(session)
+                workspace = target
+                memory_store = ProjectMemoryStore(
+                    _memory_file_for_workspace(workspace)
+                )
+                workspace_tracker = WorkspaceTracker(workspace)
+                session = session_store.create(workspace)
+                loop = _create_loop(
+                    model_client,
+                    workspace,
+                    args.max_steps,
+                    session,
+                    context_manager,
+                    output,
+                    console_settings,
+                )
+                print(f"Workspace: {workspace}", file=output)
+                print(f"Session:   {session.session_id}", file=output)
+                continue
             if task.casefold() == "/resume":
                 selected = _select_session(
                     session_store,
                     session.session_id,
+                    workspace,
                     read_input,
                     output,
                 )
@@ -510,12 +583,13 @@ def _create_loop(
 def _select_session(
     store: SessionStore,
     current_session_id: str,
+    workspace: Path,
     input_fn: Callable[[str], str],
     output: TextIO,
 ) -> Session | None:
     sessions = [
         session
-        for session in store.list_recent()
+        for session in store.list_recent(workspace=workspace)
         if session.session_id != current_session_id
     ]
     if not sessions:

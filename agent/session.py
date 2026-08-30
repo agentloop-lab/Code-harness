@@ -28,6 +28,7 @@ class Session:
     messages: list[dict[str, Any]] = field(default_factory=list)
     title: str = ""
     total_turns: int = 0
+    workspace: str = ""
 
     @property
     def display_title(self) -> str:
@@ -50,11 +51,12 @@ class SessionStore:
     def __init__(self, directory: Path) -> None:
         self.directory = directory
 
-    def create(self) -> Session:
+    def create(self, workspace: Path | str | None = None) -> Session:
         timestamp = datetime.now(timezone.utc)
         session_id = f"{timestamp:%Y%m%d-%H%M%S}-{uuid4().hex[:8]}"
         now = timestamp.isoformat()
-        return Session(session_id, now, now)
+        workspace_path = str(Path(workspace).resolve()) if workspace else ""
+        return Session(session_id, now, now, workspace=workspace_path)
 
     def save(self, session: Session) -> None:
         self.directory.mkdir(parents=True, exist_ok=True)
@@ -86,25 +88,43 @@ class SessionStore:
                     "total_turns",
                     sum(message.get("role") == "user" for message in messages),
                 ),
+                workspace=data.get("workspace", ""),
             )
         except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
             raise SessionError(f"Could not load session '{session_id}'.") from exc
 
-    def list_recent(self, limit: int = 10) -> list[Session]:
+    def list_recent(
+        self,
+        limit: int = 10,
+        workspace: Path | str | None = None,
+    ) -> list[Session]:
         paths = sorted(
             self.directory.glob("*.json"),
             key=lambda item: item.stat().st_mtime,
             reverse=True,
         )
         sessions = []
+        workspace_key = self._workspace_key(workspace)
         for path in paths:
             try:
-                sessions.append(self.load(path.stem))
+                session = self.load(path.stem)
             except SessionError:
                 continue
+            if (
+                workspace is not None
+                and self._workspace_key(session.workspace) != workspace_key
+            ):
+                continue
+            sessions.append(session)
             if len(sessions) == limit:
                 break
         return sessions
+
+    @staticmethod
+    def _workspace_key(workspace: Path | str | None) -> str:
+        if not workspace:
+            return ""
+        return str(Path(workspace).resolve()).casefold()
 
     def _path(self, session_id: str) -> Path:
         if not SESSION_ID_PATTERN.fullmatch(session_id):
