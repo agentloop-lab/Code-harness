@@ -44,6 +44,23 @@ class CommandLineTests(unittest.TestCase):
 
         self.assertIn("ject-one", [completion.text for completion in matches])
 
+    def test_completes_workspace_file_reference(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            source = workspace / "src"
+            source.mkdir()
+            (source / "main.py").write_text("print('hello')\n", encoding="utf-8")
+            completer = main.SlashCommandCompleter(lambda: workspace)
+
+            matches = list(
+                completer.get_completions(
+                    Document("Review @src/ma"),
+                    Mock(),
+                )
+            )
+
+        self.assertIn("in.py", [completion.text for completion in matches])
+
     def test_renders_and_selects_slash_commands(self) -> None:
         async def run_prompt(history_file: Path) -> tuple[str, str, str]:
             capture = io.StringIO()
@@ -137,6 +154,48 @@ class CommandLineTests(unittest.TestCase):
         self.assertIn("Code Harness | test-model", displayed)
         self.assertIn("Task> Fix the failing test", displayed)
         self.assertIn("Agent>\nFinished.", displayed)
+
+    @patch("main.AgentLoop")
+    @patch("main.ModelClient")
+    @patch("main.ToolExecutor")
+    def test_attaches_referenced_file_to_task(
+        self,
+        executor_class: Mock,
+        model_class: Mock,
+        loop_class: Mock,
+    ) -> None:
+        executor_class.return_value.definitions = []
+        model_class.return_value.config.model_name = "test-model"
+        loop = loop_class.return_value
+        loop.messages = []
+        loop.run.return_value = "Reviewed."
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            (workspace / "notes.txt").write_text(
+                "important context\n",
+                encoding="utf-8",
+            )
+            with patch(
+                "main.DEFAULT_SESSION_DIRECTORY",
+                workspace / "sessions",
+            ):
+                exit_code = main.run_cli(
+                    [
+                        "--workspace",
+                        temporary_directory,
+                        "Review",
+                        "@notes.txt",
+                    ],
+                    output=output,
+                )
+
+        prompt = loop.run.call_args.args[0]
+        self.assertEqual(exit_code, 0)
+        self.assertIn("Review @notes.txt", prompt)
+        self.assertIn("[Referenced file: notes.txt]\nimportant context", prompt)
+        self.assertIn("[context] Attached 1 file(s).", output.getvalue())
 
     @patch("main.AgentLoop")
     @patch("main.ModelClient")

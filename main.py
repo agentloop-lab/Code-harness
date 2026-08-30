@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
@@ -31,7 +32,7 @@ from agent.memory import ProjectMemoryStore
 from agent.model import ModelClient, ModelClientError, ModelConfigError
 from agent.session import Session, SessionError, SessionStore
 from agent.workspace import WorkspaceTracker
-from tools import ToolExecutor
+from tools import ToolExecutor, read_file
 
 
 SYSTEM_PROMPT = (
@@ -50,6 +51,10 @@ DEFAULT_MEMORY_FILE = Path(".agent/memory.md")
 DEFAULT_PROJECT_DIRECTORY = Path(".agent/projects")
 DEFAULT_HISTORY_FILE = Path(".agent/history")
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
+FILE_REFERENCE_PATTERN = re.compile(r"(?<!\S)@([^\s]+)")
+MAX_REFERENCE_FILES = 5
+MAX_REFERENCE_CHARS = 30_000
+MAX_REFERENCE_FILE_CHARS = 6_000
 
 
 @dataclass(frozen=True)
@@ -77,10 +82,21 @@ SLASH_COMMANDS = (
 class SlashCommandCompleter(Completer):
     """Complete slash commands at the start of a task prompt."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        workspace_getter: Callable[[], Path] | None = None,
+    ) -> None:
+        self._workspace_getter = workspace_getter
         self._path_completer = PathCompleter(
             only_directories=True,
             expanduser=True,
+        )
+        self._file_completer = PathCompleter(
+            get_paths=lambda: (
+                [str(self._workspace_getter())]
+                if self._workspace_getter is not None
+                else []
+            ),
         )
 
     def get_completions(
@@ -92,6 +108,15 @@ class SlashCommandCompleter(Completer):
         if text.casefold().startswith("/open "):
             path_text = text[len("/open ") :]
             yield from self._path_completer.get_completions(
+                Document(path_text, cursor_position=len(path_text)),
+                _complete_event,
+            )
+            return
+
+        reference = re.search(r"(?:^|\s)@([^\s]*)$", text)
+        if reference is not None and self._workspace_getter is not None:
+            path_text = reference.group(1)
+            yield from self._file_completer.get_completions(
                 Document(path_text, cursor_position=len(path_text)),
                 _complete_event,
             )
@@ -266,11 +291,15 @@ def _parser() -> argparse.ArgumentParser:
 
 def _interactive_input(
     input_fn: Callable[[str], str],
+    workspace_getter: Callable[[], Path] | None = None,
 ) -> Callable[[str], str]:
     if input_fn is not input or not sys.stdin.isatty():
         return input_fn
 
-    task_session = _task_prompt_session(DEFAULT_HISTORY_FILE)
+    task_session = _task_prompt_session(
+        DEFAULT_HISTORY_FILE,
+        workspace_getter=workspace_getter,
+    )
     choice_session: PromptSession[str] = PromptSession()
 
     def read(prompt: str) -> str:
@@ -283,6 +312,7 @@ def _interactive_input(
 def _task_prompt_session(
     history_file: Path,
     *,
+    workspace_getter: Callable[[], Path] | None = None,
     prompt_input: Input | None = None,
     prompt_output: Output | None = None,
 ) -> PromptSession[str]:
@@ -290,7 +320,7 @@ def _task_prompt_session(
     session: PromptSession[str]
     session = PromptSession(
         history=FileHistory(str(history_file)),
-        completer=SlashCommandCompleter(),
+        completer=SlashCommandCompleter(workspace_getter),
         complete_while_typing=True,
         complete_style=CompleteStyle.MULTI_COLUMN,
         input=prompt_input,
@@ -318,6 +348,40 @@ def _memory_file_for_workspace(workspace: Path) -> Path:
         str(resolved).casefold().encode("utf-8")
     ).hexdigest()[:16]
     return DEFAULT_PROJECT_DIRECTORY / key / "memory.md"
+
+
+def _attach_file_references(task: str, workspace: Path) -> tuple[str, list[str]]:
+    references = list(dict.fromkeys(FILE_REFERENCE_PATTERN.findall(task)))
+    if not references:
+        return task, []
+    if len(references) > MAX_REFERENCE_FILES:
+        raise ValueError(
+            f"A task can reference at most {MAX_REFERENCE_FILES} files."
+        )
+
+    sections = []
+    remaining = MAX_REFERENCE_CHARS
+    for path in references:
+        result = read_file(
+            workspace,
+            path,
+            max_chars=min(MAX_REFERENCE_FILE_CHARS, remaining),
+        )
+        if not result.success:
+            raise ValueError(f"Could not attach @{path}: {result.content}")
+        sections.append(f"[Referenced file: {path}]\n{result.content}")
+        remaining -= len(result.content)
+        if remaining <= 0:
+            break
+
+    attached = "\n\n".join(sections)
+    prompt = (
+        f"{task}\n\n"
+        "The user explicitly referenced these workspace file snapshots. "
+        "Use them as context. Read a file with the tool before editing it.\n\n"
+        f"{attached}"
+    )
+    return prompt, references[: len(sections)]
 
 
 def run_cli(
@@ -365,10 +429,19 @@ def run_cli(
         print(f"Session:   {session.session_id}", file=output)
 
         if initial_task:
+            agent_task, references = _attach_file_references(
+                initial_task,
+                workspace,
+            )
+            if references:
+                print(
+                    f"[context] Attached {len(references)} file(s).",
+                    file=output,
+                )
             workspace_tracker.start()
             print(f"Task> {initial_task}", file=output)
             return _run_turn(
-                initial_task,
+                agent_task,
                 loop,
                 session,
                 session_store,
@@ -376,7 +449,7 @@ def run_cli(
                 _system_prompt(memory_store.items()),
             )
 
-        read_input = _interactive_input(input_fn)
+        read_input = _interactive_input(input_fn, lambda: workspace)
         print("Commands: type / for help and completion", file=output)
         while True:
             try:
@@ -493,9 +566,22 @@ def run_cli(
                 continue
             if not task:
                 continue
+            try:
+                agent_task, references = _attach_file_references(
+                    task,
+                    workspace,
+                )
+            except ValueError as exc:
+                print(f"Error: {exc}", file=output)
+                continue
+            if references:
+                print(
+                    f"[context] Attached {len(references)} file(s).",
+                    file=output,
+                )
             workspace_tracker.start()
             _run_turn(
-                task,
+                agent_task,
                 loop,
                 session,
                 session_store,
