@@ -1,6 +1,105 @@
 # Code Harness
 
+[简体中文](README.zh-CN.md) | English
+
 A lightweight coding agent harness for autonomous software engineering tasks.
+
+## Features
+
+- OpenAI-compatible model client
+- Agent loop with file, search, edit, and command tools
+- Workspace isolation and safe file editing
+- Multi-turn conversations with saved sessions
+- Manual and automatic context compaction
+- Project memory and `@file` references
+- Read-only Plan Mode with review before execution
+- Compact CLI output with status and diff views
+
+## Setup
+
+Code Harness requires Python 3.10 or later.
+
+```bash
+python -m pip install -r requirements.txt
+```
+
+Copy `.env.example` to `.env`, then add your API configuration:
+
+```dotenv
+OPENAI_API_KEY=
+OPENAI_BASE_URL=
+MODEL_NAME=
+```
+
+`OPENAI_BASE_URL` is optional when the provider uses the SDK default.
+
+## Usage
+
+Start the interactive CLI:
+
+```bash
+python -B main.py
+```
+
+Run one task directly:
+
+```bash
+python -B main.py "Create a hello world script"
+```
+
+Use another workspace:
+
+```bash
+python -B main.py --workspace path/to/project
+```
+
+Inside the CLI, type `/` to view and complete commands:
+
+| Command | Purpose |
+| --- | --- |
+| `/open <path>` | Switch to an existing workspace |
+| `/workspace` | Show the current workspace |
+| `/resume` | Resume a saved session |
+| `/plan <task>` | Explore with read-only tools and create a plan |
+| `/act` | Execute the latest reviewed plan |
+| `/cancel` | Discard the current plan |
+| `/compact` | Compact the current conversation context |
+| `/remember <note>` | Save a project note |
+| `/memory` | Show project memory |
+| `/status` | Show files changed by the latest task |
+| `/diff` | Show text changes from the latest task |
+| `/verbose` | Toggle full tool output |
+| `/help` | Show available commands |
+| `/exit` | Save the session and exit |
+
+Reference a workspace file by adding it to a task:
+
+```text
+Task> Review @src/main.py and improve its error handling
+```
+
+Plan Mode accepts feedback before execution:
+
+```text
+Task> /plan add input validation
+Plan> Do not add new dependencies
+Plan> /act
+```
+
+## Tests
+
+Run the test suite without creating bytecode cache files:
+
+```bash
+python -B -m unittest discover -s tests
+```
+
+The live API test is disabled by default. Enable it only when `.env` contains a working API configuration:
+
+```powershell
+$env:RUN_LIVE_TESTS = "1"
+python -B -m unittest tests.test_live_agent -v
+```
 
 ## Status
 
