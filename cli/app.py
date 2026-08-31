@@ -15,6 +15,7 @@ from agent.loop import AgentLoop, AgentLoopError
 from agent.memory import ProjectMemoryStore
 from agent.model import ModelClient, ModelClientError, ModelConfigError
 from agent.session import Session, SessionError, SessionStore
+from agent.skills import Skill, SkillError, SkillStore
 from agent.workspace import WorkspaceTracker
 from cli.completion import (
     SLASH_COMMANDS,
@@ -38,7 +39,10 @@ DEFAULT_SESSION_DIRECTORY = Path(".agent/sessions")
 DEFAULT_RESULT_DIRECTORY = Path(".agent/results")
 DEFAULT_MEMORY_FILE = Path(".agent/memory.md")
 DEFAULT_PROJECT_DIRECTORY = Path(".agent/projects")
+DEFAULT_SKILL_DIRECTORIES = (Path("skills"), Path(".agent/skills"))
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run the Code Harness agent.")
     parser.add_argument(
@@ -102,6 +106,8 @@ def run_cli(
         model_client = ModelClient()
         session_store = SessionStore(DEFAULT_SESSION_DIRECTORY)
         memory_store = ProjectMemoryStore(_memory_file_for_workspace(workspace))
+        skill_store = SkillStore(DEFAULT_SKILL_DIRECTORIES)
+        active_skill: Skill | None = None
         console_settings = ConsoleSettings()
         workspace_tracker = WorkspaceTracker(workspace)
         context_manager = ContextManager(
@@ -146,10 +152,17 @@ def run_cli(
                 session,
                 session_store,
                 output,
-                _system_prompt(memory_store.items()),
+                _system_prompt(
+                    memory_store.items(),
+                    _skill_instructions(active_skill),
+                ),
             )
 
-        read_input = _interactive_input(input_fn, lambda: workspace)
+        read_input = _interactive_input(
+            input_fn,
+            lambda: workspace,
+            skill_store.names,
+        )
         print("Commands: type / for help and completion", file=output)
         while True:
             try:
@@ -243,6 +256,27 @@ def run_cli(
             if task.casefold() == "/memory":
                 _show_memory(memory_store, output)
                 continue
+            if task.casefold() == "/skills":
+                _show_skills(skill_store, active_skill, output)
+                continue
+            if task.casefold() == "/skill" or task.casefold().startswith(
+                "/skill "
+            ):
+                name = task[len("/skill") :].strip()
+                if not name:
+                    print("Usage: /skill <name|off>", file=output)
+                    continue
+                if name.casefold() == "off":
+                    active_skill = None
+                    print("Active skill: none.", file=output)
+                    continue
+                try:
+                    active_skill = skill_store.load(name)
+                except (OSError, UnicodeError, SkillError) as exc:
+                    print(f"Error: {exc}", file=output)
+                    continue
+                print(f"Active skill: {active_skill.name}.", file=output)
+                continue
             if task.casefold() in {"/", "/help"}:
                 _show_help(output)
                 continue
@@ -301,7 +335,10 @@ def run_cli(
                     session,
                     session_store,
                     output,
-                    _planning_system_prompt(memory_store.items()),
+                    _planning_system_prompt(
+                        memory_store.items(),
+                        _skill_instructions(active_skill),
+                    ),
                     answer_label="Plan>",
                 )
                 loop.messages = planning_loop.messages
@@ -329,7 +366,10 @@ def run_cli(
                     session,
                     session_store,
                     output,
-                    _system_prompt(memory_store.items()),
+                    _system_prompt(
+                        memory_store.items(),
+                        _skill_instructions(active_skill),
+                    ),
                 )
                 if result == 0:
                     pending_plan = None
@@ -372,7 +412,10 @@ def run_cli(
                     session,
                     session_store,
                     output,
-                    _planning_system_prompt(memory_store.items()),
+                    _planning_system_prompt(
+                        memory_store.items(),
+                        _skill_instructions(active_skill),
+                    ),
                     answer_label="Plan>",
                 )
                 loop.messages = planning_loop.messages
@@ -406,7 +449,10 @@ def run_cli(
                 session,
                 session_store,
                 output,
-                _system_prompt(memory_store.items()),
+                _system_prompt(
+                    memory_store.items(),
+                    _skill_instructions(active_skill),
+                ),
             )
     except (
         ModelClientError,
@@ -427,6 +473,31 @@ def _show_memory(store: ProjectMemoryStore, output: TextIO) -> None:
     print("Project memory", file=output)
     for note in notes:
         print(f"  - {note}", file=output)
+
+
+def _show_skills(
+    store: SkillStore,
+    active_skill: Skill | None,
+    output: TextIO,
+) -> None:
+    skills = store.summaries()
+    if not skills:
+        print("No skills found.", file=output)
+        return
+    print("Available skills", file=output)
+    for skill in skills:
+        marker = "*" if active_skill and active_skill.name == skill.name else " "
+        print(f" {marker} {skill.name} - {skill.description}", file=output)
+
+
+def _skill_instructions(skill: Skill | None) -> str | None:
+    if skill is None:
+        return None
+    return (
+        f"Skill: {skill.name}\n"
+        f"Description: {skill.description}\n\n"
+        f"{skill.instructions}"
+    )
 
 
 def _show_help(output: TextIO) -> None:

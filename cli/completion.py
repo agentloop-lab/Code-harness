@@ -39,6 +39,8 @@ SLASH_COMMANDS = (
     SlashCommand("/compact", "/compact", "Compact conversation context"),
     SlashCommand("/memory", "/memory", "Show project memory"),
     SlashCommand("/remember", "/remember <note>", "Save a project note"),
+    SlashCommand("/skills", "/skills", "List available skills"),
+    SlashCommand("/skill", "/skill <name|off>", "Activate or disable a skill"),
     SlashCommand("/verbose", "/verbose", "Toggle full tool output"),
     SlashCommand("/status", "/status", "Show latest workspace changes"),
     SlashCommand("/diff", "/diff", "Show latest code changes"),
@@ -56,8 +58,10 @@ class SlashCommandCompleter(Completer):
     def __init__(
         self,
         workspace_getter: Callable[[], Path] | None = None,
+        skill_names_getter: Callable[[], list[str]] | None = None,
     ) -> None:
         self._workspace_getter = workspace_getter
+        self._skill_names_getter = skill_names_getter
         self._path_completer = PathCompleter(
             only_directories=True,
             expanduser=True,
@@ -84,6 +88,15 @@ class SlashCommandCompleter(Completer):
             )
             return
 
+        if text.casefold().startswith("/skill "):
+            value = text[len("/skill ") :]
+            if " " not in value and self._skill_names_getter is not None:
+                options = [*self._skill_names_getter(), "off"]
+                for name in options:
+                    if name.startswith(value.casefold()):
+                        yield Completion(name, start_position=-len(value))
+            return
+
         reference = re.search(r"(?:^|\s)@([^\s]*)$", text)
         if reference is not None and self._workspace_getter is not None:
             path_text = reference.group(1)
@@ -108,6 +121,7 @@ class SlashCommandCompleter(Completer):
 def interactive_input(
     input_fn: Callable[[str], str],
     workspace_getter: Callable[[], Path] | None = None,
+    skill_names_getter: Callable[[], list[str]] | None = None,
 ) -> Callable[[str], str]:
     if input_fn is not input or not sys.stdin.isatty():
         return input_fn
@@ -115,6 +129,7 @@ def interactive_input(
     task_session = task_prompt_session(
         DEFAULT_HISTORY_FILE,
         workspace_getter=workspace_getter,
+        skill_names_getter=skill_names_getter,
     )
     choice_session: PromptSession[str] = PromptSession()
 
@@ -133,13 +148,17 @@ def task_prompt_session(
     history_file: Path,
     *,
     workspace_getter: Callable[[], Path] | None = None,
+    skill_names_getter: Callable[[], list[str]] | None = None,
     prompt_input: Input | None = None,
     prompt_output: Output | None = None,
 ) -> PromptSession[str]:
     history_file.parent.mkdir(parents=True, exist_ok=True)
     return PromptSession(
         history=FileHistory(str(history_file)),
-        completer=SlashCommandCompleter(workspace_getter),
+        completer=SlashCommandCompleter(
+            workspace_getter,
+            skill_names_getter,
+        ),
         complete_while_typing=True,
         complete_style=CompleteStyle.MULTI_COLUMN,
         input=prompt_input,

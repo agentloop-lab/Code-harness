@@ -61,6 +61,20 @@ class CommandLineTests(unittest.TestCase):
 
         self.assertIn("in.py", [completion.text for completion in matches])
 
+    def test_completes_skill_names(self) -> None:
+        completer = main.SlashCommandCompleter(
+            skill_names_getter=lambda: ["python-testing", "code-review"],
+        )
+
+        matches = list(
+            completer.get_completions(Document("/skill py"), Mock())
+        )
+
+        self.assertEqual(
+            [completion.text for completion in matches],
+            ["python-testing"],
+        )
+
     def test_renders_and_selects_slash_commands(self) -> None:
         async def run_prompt(history_file: Path) -> tuple[str, str, str]:
             capture = io.StringIO()
@@ -534,6 +548,68 @@ class CommandLineTests(unittest.TestCase):
         displayed = output.getvalue()
         self.assertIn("Project memory updated.", displayed)
         self.assertIn("  - Use pytest for tests.", displayed)
+
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
+    def test_skill_commands_load_and_disable_instructions(
+        self,
+        executor_class: Mock,
+        model_class: Mock,
+        loop_class: Mock,
+    ) -> None:
+        executor_class.return_value.definitions = []
+        model_class.return_value.config.model_name = "test-model"
+        loop = loop_class.return_value
+        loop.messages = []
+        loop.run.side_effect = ["Fixed.", "Explained."]
+        inputs = iter(
+            [
+                "/skills",
+                "/skill python-testing",
+                "Fix the tests",
+                "/skill off",
+                "Explain the code",
+                "/exit",
+            ]
+        )
+        output = io.StringIO()
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            skill_directory = root / "skills" / "python-testing"
+            skill_directory.mkdir(parents=True)
+            (skill_directory / "SKILL.md").write_text(
+                "---\n"
+                "name: python-testing\n"
+                "description: Use for Python tests.\n"
+                "---\n\n"
+                "Run focused tests first.\n",
+                encoding="utf-8",
+            )
+            with (
+                patch("cli.app.DEFAULT_SESSION_DIRECTORY", root / "sessions"),
+                patch(
+                    "cli.app.DEFAULT_SKILL_DIRECTORIES",
+                    (root / "skills",),
+                ),
+            ):
+                exit_code = main.run_cli(
+                    ["--workspace", str(root / "workspace")],
+                    input_fn=lambda prompt: next(inputs),
+                    output=output,
+                )
+
+        self.assertEqual(exit_code, 0)
+        first_prompt = loop.run.call_args_list[0].kwargs["system_prompt"]
+        second_prompt = loop.run.call_args_list[1].kwargs["system_prompt"]
+        self.assertIn("Skill: python-testing", first_prompt)
+        self.assertIn("Run focused tests first.", first_prompt)
+        self.assertEqual(second_prompt, main.SYSTEM_PROMPT)
+        displayed = output.getvalue()
+        self.assertIn("python-testing - Use for Python tests.", displayed)
+        self.assertIn("Active skill: python-testing.", displayed)
+        self.assertIn("Active skill: none.", displayed)
 
     @patch("cli.app.AgentLoop")
     @patch("cli.app.ModelClient")
