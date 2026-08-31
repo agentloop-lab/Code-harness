@@ -13,6 +13,7 @@ A lightweight coding agent harness for autonomous software engineering tasks.
 - Manual and automatic context compaction
 - Project memory and `@file` references
 - Read-only Plan Mode with review before execution
+- Reusable Skills with explicit activation
 - Compact CLI output with status and diff views
 
 ## Setup
@@ -20,7 +21,7 @@ A lightweight coding agent harness for autonomous software engineering tasks.
 Code Harness requires Python 3.10 or later.
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
 Copy `.env.example` to `.env`, then add your API configuration:
@@ -38,19 +39,19 @@ MODEL_NAME=
 Start the interactive CLI:
 
 ```bash
-python -B main.py
+code-harness
 ```
 
 Run one task directly:
 
 ```bash
-python -B main.py "Create a hello world script"
+code-harness "Create a hello world script"
 ```
 
 Use another workspace:
 
 ```bash
-python -B main.py --workspace path/to/project
+code-harness --workspace path/to/project
 ```
 
 Inside the CLI, type `/` to view and complete commands:
@@ -66,6 +67,8 @@ Inside the CLI, type `/` to view and complete commands:
 | `/compact` | Compact the current conversation context |
 | `/remember <note>` | Save a project note |
 | `/memory` | Show project memory |
+| `/skills` | List available Skills |
+| `/skill <name\|off>` | Activate a Skill or disable the current one |
 | `/status` | Show files changed by the latest task |
 | `/diff` | Show text changes from the latest task |
 | `/verbose` | Toggle full tool output |
@@ -85,6 +88,40 @@ Task> /plan add input validation
 Plan> Do not add new dependencies
 Plan> /act
 ```
+
+## Skills
+
+A Skill is a `SKILL.md` file containing reusable instructions for a specific type of task. Bundled Skills live in `skills/`. Local Skills that should not be committed can be placed in `.agent/skills/`:
+
+```text
+skills/
+└── python-testing/
+    └── SKILL.md
+```
+
+Each `SKILL.md` starts with a small metadata block. Its `name` must match the directory name:
+
+```markdown
+---
+name: python-testing
+description: Diagnose and fix Python test failures with focused verification.
+---
+
+# Python Testing
+
+- Run the smallest relevant test before changing code.
+```
+
+List and activate Skills from the CLI:
+
+```text
+Task> /skills
+Task> /skill python-testing
+Task> Diagnose the failing Python tests
+Task> /skill off
+```
+
+Only the selected Skill is added to the agent instructions. The selection lasts for the current CLI process and does not bypass workspace or tool safety checks.
 
 ## Tests
 

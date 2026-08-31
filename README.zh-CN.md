@@ -13,6 +13,7 @@
 - 手动和自动上下文压缩
 - 项目记忆与 `@文件` 引用
 - 执行前可审查的只读 Plan Mode
+- 可显式启用的可复用 Skills
 - 紧凑的工具输出、文件状态和代码差异展示
 
 ## 安装
@@ -20,7 +21,7 @@
 Code Harness 需要 Python 3.10 或更高版本。
 
 ```bash
-python -m pip install -r requirements.txt
+python -m pip install -e .
 ```
 
 将 `.env.example` 复制为 `.env`，然后填写 API 配置：
@@ -38,19 +39,19 @@ MODEL_NAME=
 启动交互式 CLI：
 
 ```bash
-python -B main.py
+code-harness
 ```
 
 直接执行单次任务：
 
 ```bash
-python -B main.py "创建一个 Hello World 脚本"
+code-harness "创建一个 Hello World 脚本"
 ```
 
 指定其他工作区：
 
 ```bash
-python -B main.py --workspace path/to/project
+code-harness --workspace path/to/project
 ```
 
 在 CLI 中输入 `/` 可以查看和补全命令：
@@ -66,6 +67,8 @@ python -B main.py --workspace path/to/project
 | `/compact` | 压缩当前会话上下文 |
 | `/remember <note>` | 保存一条项目记忆 |
 | `/memory` | 查看项目记忆 |
+| `/skills` | 查看可用的 Skills |
+| `/skill <名称\|off>` | 启用一个 Skill 或关闭当前 Skill |
 | `/status` | 查看最近一次任务修改的文件 |
 | `/diff` | 查看最近一次任务产生的文本差异 |
 | `/verbose` | 切换完整工具输出 |
@@ -85,6 +88,40 @@ Task> /plan 增加输入参数校验
 Plan> 不要增加新的依赖
 Plan> /act
 ```
+
+## Skills
+
+Skill 是一个为特定任务提供可复用说明的 `SKILL.md` 文件。随项目提交的 Skill 放在 `skills/`，不希望提交到仓库的本地 Skill 可以放在 `.agent/skills/`：
+
+```text
+skills/
+└── python-testing/
+    └── SKILL.md
+```
+
+每个 `SKILL.md` 都以简短的元数据开头，其中 `name` 必须和目录名一致：
+
+```markdown
+---
+name: python-testing
+description: Diagnose and fix Python test failures with focused verification.
+---
+
+# Python Testing
+
+- Run the smallest relevant test before changing code.
+```
+
+在 CLI 中查看和启用 Skill：
+
+```text
+Task> /skills
+Task> /skill python-testing
+Task> 检查并修复当前失败的 Python 测试
+Task> /skill off
+```
+
+只有当前选中的 Skill 会加入 Agent 指令。选择结果只在本次 CLI 进程中生效，也不能绕过工作区和工具安全限制。
 
 ## 测试
 

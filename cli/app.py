@@ -15,7 +15,12 @@ from agent.loop import AgentLoop, AgentLoopError
 from agent.memory import ProjectMemoryStore
 from agent.model import ModelClient, ModelClientError, ModelConfigError
 from agent.session import Session, SessionError, SessionStore
-from agent.skills import Skill, SkillError, SkillStore
+from agent.skills import (
+    BUNDLED_SKILL_DIRECTORY,
+    Skill,
+    SkillError,
+    SkillStore,
+)
 from agent.workspace import WorkspaceTracker
 from cli.completion import (
     SLASH_COMMANDS,
@@ -39,7 +44,11 @@ DEFAULT_SESSION_DIRECTORY = Path(".agent/sessions")
 DEFAULT_RESULT_DIRECTORY = Path(".agent/results")
 DEFAULT_MEMORY_FILE = Path(".agent/memory.md")
 DEFAULT_PROJECT_DIRECTORY = Path(".agent/projects")
-DEFAULT_SKILL_DIRECTORIES = (Path("skills"), Path(".agent/skills"))
+DEFAULT_SKILL_DIRECTORIES = (
+    BUNDLED_SKILL_DIRECTORY,
+    Path("skills"),
+    Path(".agent/skills"),
+)
 EXIT_COMMANDS = {"exit", "quit", "/exit", "/quit"}
 
 

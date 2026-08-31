@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "code-harness"
+version = "0.1.0"
+description = "A lightweight coding agent harness for autonomous software engineering tasks."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "openai>=1.0.0,<3.0.0",
+    "prompt-toolkit>=3.0.0,<4.0.0",
+    "python-dotenv>=1.0.0,<2.0.0",
+]
+
+[project.scripts]
+code-harness = "cli.entrypoint:main"
+
+[tool.setuptools.packages.find]
+include = ["agent*", "cli*", "skills*", "tools*"]
+
+[tool.setuptools.package-data]
+skills = ["*/SKILL.md"]

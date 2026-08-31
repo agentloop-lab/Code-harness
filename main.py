@@ -1,11 +1,7 @@
-"""Command-line entry point for Code Harness."""
+"""Compatibility entry point for running Code Harness from source."""
 
-from cli.app import run_cli
-
-
-def main() -> None:
-    raise SystemExit(run_cli())
+from cli.entrypoint import main
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

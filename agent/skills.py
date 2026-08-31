@@ -10,6 +10,7 @@ from typing import Sequence
 
 NAME_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
 HEADER_LIMIT = 4096
+BUNDLED_SKILL_DIRECTORY = Path(__file__).resolve().parent.parent / "skills"
 
 
 class SkillError(ValueError):
