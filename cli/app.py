@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TextIO
 
 from agent.context import ContextError, ContextManager
-from agent.loop import AgentLoop, AgentLoopError
+from agent.loop import DEFAULT_MAX_STEPS, AgentLoop, AgentLoopError
 from agent.memory import ProjectMemoryStore
 from agent.model import ModelClient, ModelClientError, ModelConfigError
 from agent.session import Session, SessionError, SessionStore
@@ -68,8 +68,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=10,
-        help="Maximum number of model steps (default: 10).",
+        default=DEFAULT_MAX_STEPS,
+        help=(
+            "Maximum number of model steps "
+            f"(default: {DEFAULT_MAX_STEPS})."
+        ),
     )
     return parser
 

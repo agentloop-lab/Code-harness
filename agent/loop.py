@@ -18,6 +18,7 @@ TaskStatus = Literal[
     "failed",
 ]
 ToolExecutor = Callable[[str, Mapping[str, Any]], Any]
+DEFAULT_MAX_STEPS = 40
 MODIFYING_TOOL_NAMES = frozenset({"write_file", "edit_file"})
 VERIFICATION_TOOL_NAME = "run_command"
 VERIFICATION_UNAVAILABLE_PREFIX = "verification unavailable:"
@@ -71,7 +72,7 @@ class AgentLoop:
         model_client: ModelClient,
         tools: Sequence[Mapping[str, Any]] | None = None,
         tool_executor: ToolExecutor | None = None,
-        max_steps: int = 10,
+        max_steps: int = DEFAULT_MAX_STEPS,
         history: Sequence[Mapping[str, Any]] | None = None,
         context_manager: ContextManager | None = None,
         no_progress_warning_threshold: int = 2,

@@ -56,6 +56,18 @@ Use another workspace:
 code-harness --workspace path/to/project
 ```
 
+The workspace may be anywhere on the filesystem. In an interactive session,
+use an absolute path or `..` to switch outside the current workspace:
+
+```text
+Task> /open D:\projects\another-project
+Task> /open ..\sibling-project
+```
+
+File tools stay isolated to the selected workspace. Switch workspaces first if
+the agent needs to work on a different project. Agent runs allow 40 model steps
+by default; use `--max-steps N` to override the limit for a session.
+
 Inside the CLI, type `/` to view and complete commands:
 
 | Command | Purpose |

@@ -30,6 +30,11 @@ class AgentLoopTests(unittest.TestCase):
         self.model_client = Mock()
         self.tool_executor = Mock()
 
+    def test_uses_forty_steps_by_default(self) -> None:
+        loop = AgentLoop(self.model_client)
+
+        self.assertEqual(loop.max_steps, 40)
+
     def test_returns_final_answer_without_tool_calls(self) -> None:
         self.model_client.chat.return_value = model_response(content="Done")
         loop = AgentLoop(self.model_client, max_steps=3)

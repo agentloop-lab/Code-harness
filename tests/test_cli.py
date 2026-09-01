@@ -17,6 +17,9 @@ from agent.model import ModelClientError
 
 
 class CommandLineTests(unittest.TestCase):
+    def test_uses_forty_model_steps_by_default(self) -> None:
+        self.assertEqual(main._parser().parse_args([]).max_steps, 40)
+
     def test_completes_slash_command_prefixes(self) -> None:
         completer = main.SlashCommandCompleter()
 
@@ -155,7 +158,7 @@ class CommandLineTests(unittest.TestCase):
             model_class.return_value,
             tools=executor.definitions,
             tool_executor=unittest.mock.ANY,
-            max_steps=10,
+            max_steps=40,
             history=[],
             context_manager=unittest.mock.ANY,
         )
