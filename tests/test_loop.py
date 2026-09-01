@@ -1,9 +1,18 @@
 import json
+import sys
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, call
 
-from agent.loop import AgentLoop, AgentLoopError, AgentLoopLimitError
+from agent.loop import (
+    AgentLoop,
+    AgentLoopError,
+    AgentLoopLimitError,
+    AgentNoProgressError,
+)
+from tools.executor import ToolExecutor
 
 
 def model_response(content=None, tool_calls=None):
@@ -225,6 +234,197 @@ class AgentLoopTests(unittest.TestCase):
         self.assertEqual(result, "Recovered")
         self.assertEqual(tool_result["error_type"], "ToolError")
         self.assertEqual(loop.state.task_status, "completed")
+
+    def test_requires_successful_command_after_file_change(self) -> None:
+        self.model_client.chat.side_effect = [
+            model_response(
+                tool_calls=[
+                    tool_call(
+                        name="write_file",
+                        arguments='{"path": "new.py", "content": "pass\\n"}',
+                    )
+                ]
+            ),
+            model_response(content="Implemented."),
+            model_response(
+                tool_calls=[
+                    tool_call(
+                        call_id="call-2",
+                        name="run_command",
+                        arguments='{"command": ["python", "-B", "-m", "unittest"]}',
+                    )
+                ]
+            ),
+            model_response(content="Implemented and verified."),
+        ]
+        self.tool_executor.side_effect = [
+            {"success": True, "content": "Created file: new.py"},
+            {"success": True, "content": '{"exit_code": 0}'},
+        ]
+        loop = AgentLoop(
+            self.model_client,
+            tool_executor=self.tool_executor,
+            max_steps=5,
+        )
+
+        result = loop.run("Create new.py")
+
+        self.assertEqual(result, "Implemented and verified.")
+        self.assertEqual(loop.state.verification_reminders, 1)
+        self.assertFalse(loop.state.verification_required)
+        self.assertTrue(loop.state.last_verification_successful)
+        self.assertIn(
+            "workspace has changed",
+            loop.messages[4]["content"],
+        )
+
+    def test_verification_state_uses_real_file_and_command_tools(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            workspace = Path(temporary_directory)
+            executor = ToolExecutor(workspace)
+            self.model_client.chat.side_effect = [
+                model_response(
+                    tool_calls=[
+                        tool_call(
+                            name="write_file",
+                            arguments=(
+                                '{"path": "check.py", '
+                                '"content": "print(\\\"verified\\\")\\n"}'
+                            ),
+                        )
+                    ]
+                ),
+                model_response(content="Created."),
+                model_response(
+                    tool_calls=[
+                        tool_call(
+                            call_id="call-2",
+                            name="run_command",
+                            arguments=json.dumps(
+                                {"command": [sys.executable, "-B", "check.py"]}
+                            ),
+                        )
+                    ]
+                ),
+                model_response(content="Created and verified."),
+            ]
+            loop = AgentLoop(
+                self.model_client,
+                tools=executor.definitions,
+                tool_executor=executor,
+                max_steps=5,
+            )
+
+            result = loop.run("Create and verify check.py")
+
+            self.assertEqual(result, "Created and verified.")
+            self.assertEqual(
+                (workspace / "check.py").read_text(encoding="utf-8"),
+                'print("verified")\n',
+            )
+            self.assertFalse(loop.state.verification_required)
+            self.assertTrue(loop.state.last_verification_successful)
+
+    def test_failed_command_does_not_verify_file_change(self) -> None:
+        self.model_client.chat.side_effect = [
+            model_response(
+                tool_calls=[
+                    tool_call(
+                        name="edit_file",
+                        arguments=(
+                            '{"path": "app.py", "old_text": "old", '
+                            '"new_text": "new"}'
+                        ),
+                    )
+                ]
+            ),
+            model_response(
+                tool_calls=[
+                    tool_call(
+                        call_id="call-2",
+                        name="run_command",
+                        arguments='{"command": ["python", "-B", "-m", "unittest"]}',
+                    )
+                ]
+            ),
+            model_response(content="Done."),
+            model_response(content="Verification unavailable: tests are broken."),
+        ]
+        self.tool_executor.side_effect = [
+            {"success": True, "content": "Updated file: app.py"},
+            {"success": False, "content": "failed", "error_type": "CommandFailed"},
+        ]
+        loop = AgentLoop(
+            self.model_client,
+            tool_executor=self.tool_executor,
+            max_steps=5,
+        )
+
+        result = loop.run("Update app.py")
+
+        self.assertEqual(result, "Verification unavailable: tests are broken.")
+        self.assertEqual(loop.state.verification_reminders, 1)
+        self.assertFalse(loop.state.last_verification_successful)
+        self.assertFalse(loop.state.verification_required)
+
+    def test_warns_after_repeated_tool_observations(self) -> None:
+        self.model_client.chat.side_effect = [
+            model_response(tool_calls=[tool_call(call_id="call-1")]),
+            model_response(tool_calls=[tool_call(call_id="call-2")]),
+            model_response(
+                tool_calls=[
+                    tool_call(
+                        call_id="call-3",
+                        name="search_text",
+                        arguments='{"query": "target"}',
+                    )
+                ]
+            ),
+            model_response(content="Found another approach."),
+        ]
+        self.tool_executor.side_effect = [
+            {"success": True, "content": "same file"},
+            {"success": True, "content": "same file"},
+            {"success": True, "content": "new result"},
+        ]
+        loop = AgentLoop(
+            self.model_client,
+            tool_executor=self.tool_executor,
+            max_steps=5,
+        )
+
+        result = loop.run("Inspect the project")
+
+        self.assertEqual(result, "Found another approach.")
+        self.assertEqual(loop.state.no_progress_warnings, 1)
+        warnings = [
+            message
+            for message in loop.messages
+            if message.get("role") == "user"
+            and "No progress detected" in str(message.get("content"))
+        ]
+        self.assertEqual(len(warnings), 1)
+
+    def test_stops_after_repeated_tool_observations_continue(self) -> None:
+        self.model_client.chat.return_value = model_response(tool_calls=[tool_call()])
+        self.tool_executor.return_value = {
+            "success": False,
+            "content": "missing",
+            "error_type": "FileNotFound",
+        }
+        loop = AgentLoop(
+            self.model_client,
+            tool_executor=self.tool_executor,
+            max_steps=6,
+        )
+
+        with self.assertRaisesRegex(AgentNoProgressError, "repeated 3 times"):
+            loop.run("Inspect a.py")
+
+        self.assertEqual(self.model_client.chat.call_count, 3)
+        self.assertEqual(self.tool_executor.call_count, 3)
+        self.assertEqual(loop.state.no_progress_warnings, 1)
+        self.assertEqual(loop.state.task_status, "no_progress")
 
     def test_marks_model_errors_as_failed(self) -> None:
         self.model_client.chat.side_effect = RuntimeError("network")

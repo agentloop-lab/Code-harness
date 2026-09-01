@@ -14,6 +14,8 @@ A lightweight coding agent harness for autonomous software engineering tasks.
 - Project memory and `@file` references
 - Read-only Plan Mode with review before execution
 - Reusable Skills with explicit activation
+- Verification-aware completion after file changes
+- No-progress warnings and early termination for repeated tool calls
 - Compact CLI output with status and diff views
 
 ## Setup

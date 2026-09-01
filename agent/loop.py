@@ -10,8 +10,28 @@ from agent.context import ContextManager, SUMMARY_MARKER
 from agent.model import ModelClient
 
 
-TaskStatus = Literal["running", "completed", "max_steps", "failed"]
+TaskStatus = Literal[
+    "running",
+    "completed",
+    "max_steps",
+    "no_progress",
+    "failed",
+]
 ToolExecutor = Callable[[str, Mapping[str, Any]], Any]
+MODIFYING_TOOL_NAMES = frozenset({"write_file", "edit_file"})
+VERIFICATION_TOOL_NAME = "run_command"
+VERIFICATION_UNAVAILABLE_PREFIX = "verification unavailable:"
+VERIFICATION_REMINDER = (
+    "The workspace has changed, but no successful command has verified the "
+    "latest file changes. Run an appropriate test, build, lint, or validation "
+    "command before finishing. If verification genuinely cannot be run, begin "
+    "the final answer with 'Verification unavailable:' and explain why."
+)
+NO_PROGRESS_WARNING = (
+    "No progress detected: the same tool call produced the same observation "
+    "again. Do not repeat it. Inspect different evidence, change the arguments, "
+    "or use another approach."
+)
 
 
 class AgentLoopError(RuntimeError):
@@ -20,6 +40,10 @@ class AgentLoopError(RuntimeError):
 
 class AgentLoopLimitError(AgentLoopError):
     """Raised when the agent reaches its step limit."""
+
+
+class AgentNoProgressError(AgentLoopError):
+    """Raised when repeated tool calls produce no new information."""
 
 
 @dataclass
@@ -31,6 +55,12 @@ class AgentState:
     current_step: int = 0
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     task_status: TaskStatus = "running"
+    workspace_dirty: bool = False
+    verification_required: bool = False
+    last_verification_successful: bool = False
+    verification_reminders: int = 0
+    no_progress_warnings: int = 0
+    repeated_observations: int = 0
 
 
 class AgentLoop:
@@ -44,9 +74,17 @@ class AgentLoop:
         max_steps: int = 10,
         history: Sequence[Mapping[str, Any]] | None = None,
         context_manager: ContextManager | None = None,
+        no_progress_warning_threshold: int = 2,
+        no_progress_stop_threshold: int = 3,
     ) -> None:
         if max_steps < 1:
             raise ValueError("max_steps must be at least 1.")
+        if no_progress_warning_threshold < 2:
+            raise ValueError("no_progress_warning_threshold must be at least 2.")
+        if no_progress_stop_threshold <= no_progress_warning_threshold:
+            raise ValueError(
+                "no_progress_stop_threshold must exceed the warning threshold."
+            )
 
         self.model_client = model_client
         self.tools = list(tools) if tools else None
@@ -54,14 +92,31 @@ class AgentLoop:
         self.max_steps = max_steps
         self.messages = [dict(message) for message in history or []]
         self.context_manager = context_manager
+        self.no_progress_warning_threshold = no_progress_warning_threshold
+        self.no_progress_stop_threshold = no_progress_stop_threshold
+        self.workspace_dirty = False
+        self.verification_required = False
+        self.last_verification_successful = False
+        self._last_observation: str | None = None
+        self._last_warned_observation: str | None = None
+        self._repeated_observations = 0
         self.state: AgentState | None = None
 
     def run(self, task: str, system_prompt: str | None = None) -> str:
         if system_prompt:
             self._set_system_prompt(system_prompt)
         self.messages.append({"role": "user", "content": task})
+        self._last_observation = None
+        self._last_warned_observation = None
+        self._repeated_observations = 0
 
-        self.state = AgentState(messages=self.messages, max_steps=self.max_steps)
+        self.state = AgentState(
+            messages=self.messages,
+            max_steps=self.max_steps,
+            workspace_dirty=self.workspace_dirty,
+            verification_required=self.verification_required,
+            last_verification_successful=self.last_verification_successful,
+        )
 
         while self.state.current_step < self.state.max_steps:
             self.state.current_step += 1
@@ -85,12 +140,30 @@ class AgentLoop:
                 self.state.messages.append(assistant_message)
 
                 if not tool_calls:
+                    content = assistant_message.get("content") or ""
+                    if self.verification_required:
+                        if self._reports_verification_unavailable(content):
+                            self.verification_required = False
+                            self.last_verification_successful = False
+                            self._sync_verification_state()
+                        else:
+                            self.state.verification_reminders += 1
+                            self.state.messages.append(
+                                {"role": "user", "content": VERIFICATION_REMINDER}
+                            )
+                            continue
                     self.state.task_status = "completed"
-                    return assistant_message.get("content") or ""
+                    return content
 
                 self.state.tool_calls.extend(tool_calls)
                 for tool_call in tool_calls:
-                    self.state.messages.append(self._execute_tool(tool_call))
+                    tool_message = self._execute_tool(tool_call)
+                    self.state.messages.append(tool_message)
+                    self._observe_tool_result(tool_call, tool_message)
+                self._handle_no_progress()
+            except AgentNoProgressError:
+                self.state.task_status = "no_progress"
+                raise
             except AgentLoopError:
                 self.state.task_status = "failed"
                 raise
@@ -176,6 +249,8 @@ class AgentLoop:
                 f"Tool execution failed: {name}",
             )
 
+        self._record_verification_result(name, result)
+
         try:
             content = (
                 result
@@ -195,6 +270,87 @@ class AgentLoop:
             "tool_call_id": tool_call["id"],
             "content": content,
         }
+
+    def _record_verification_result(self, name: str, result: Any) -> None:
+        if not isinstance(result, Mapping) or result.get("success") is not True:
+            return
+        if name in MODIFYING_TOOL_NAMES:
+            self.workspace_dirty = True
+            self.verification_required = True
+            self.last_verification_successful = False
+        elif name == VERIFICATION_TOOL_NAME and self.verification_required:
+            self.verification_required = False
+            self.last_verification_successful = True
+        self._sync_verification_state()
+
+    def _sync_verification_state(self) -> None:
+        if self.state is None:
+            return
+        self.state.workspace_dirty = self.workspace_dirty
+        self.state.verification_required = self.verification_required
+        self.state.last_verification_successful = (
+            self.last_verification_successful
+        )
+
+    @staticmethod
+    def _reports_verification_unavailable(content: str) -> bool:
+        return content.lstrip().casefold().startswith(
+            VERIFICATION_UNAVAILABLE_PREFIX
+        )
+
+    def _observe_tool_result(
+        self,
+        tool_call: Mapping[str, Any],
+        tool_message: Mapping[str, Any],
+    ) -> None:
+        function = tool_call.get("function")
+        name = function.get("name") if isinstance(function, Mapping) else None
+        arguments = (
+            function.get("arguments") if isinstance(function, Mapping) else None
+        )
+        try:
+            parsed_arguments = (
+                json.loads(arguments)
+                if isinstance(arguments, str)
+                else arguments
+            )
+        except json.JSONDecodeError:
+            parsed_arguments = arguments
+        observation = json.dumps(
+            {
+                "name": name,
+                "arguments": parsed_arguments,
+                "content": tool_message.get("content"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            default=str,
+        )
+        if observation == self._last_observation:
+            self._repeated_observations += 1
+        else:
+            self._last_observation = observation
+            self._last_warned_observation = None
+            self._repeated_observations = 1
+        if self.state is not None:
+            self.state.repeated_observations = self._repeated_observations
+
+    def _handle_no_progress(self) -> None:
+        if self._repeated_observations >= self.no_progress_stop_threshold:
+            raise AgentNoProgressError(
+                "Agent stopped because the same tool call and observation "
+                f"repeated {self._repeated_observations} times."
+            )
+        if (
+            self._repeated_observations >= self.no_progress_warning_threshold
+            and self._last_warned_observation != self._last_observation
+        ):
+            self._last_warned_observation = self._last_observation
+            if self.state is not None:
+                self.state.no_progress_warnings += 1
+                self.state.messages.append(
+                    {"role": "user", "content": NO_PROGRESS_WARNING}
+                )
 
     @staticmethod
     def _tool_error_message(
