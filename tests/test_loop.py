@@ -330,6 +330,87 @@ class AgentLoopTests(unittest.TestCase):
             self.assertFalse(loop.state.verification_required)
             self.assertTrue(loop.state.last_verification_successful)
 
+    def test_nudges_agent_to_finish_after_successful_verification(self) -> None:
+        self.model_client.chat.side_effect = [
+            model_response(
+                tool_calls=[
+                    tool_call(
+                        call_id="call-edit",
+                        name="edit_file",
+                        arguments='{"path": "app.py", "old_text": "x", "new_text": "y"}',
+                    )
+                ]
+            ),
+            model_response(
+                tool_calls=[
+                    tool_call(
+                        call_id="call-test",
+                        name="run_command",
+                        arguments='{"command": ["python", "-m", "unittest"]}',
+                    )
+                ]
+            ),
+            model_response(content="Implemented and verified."),
+        ]
+        self.tool_executor.side_effect = [
+            {"success": True, "content": "Updated file: app.py"},
+            {"success": True, "content": "tests passed"},
+        ]
+        loop = AgentLoop(
+            self.model_client,
+            tools=[{"type": "function", "function": {"name": "read_file"}}],
+            tool_executor=self.tool_executor,
+            max_steps=5,
+        )
+
+        result = loop.run("Update app.py")
+
+        self.assertEqual(result, "Implemented and verified.")
+        self.assertEqual(loop.state.completion_reminders, 1)
+        self.assertTrue(
+            any(
+                message.get("role") == "user"
+                and "verified" in str(message.get("content")).casefold()
+                for message in loop.messages
+            )
+        )
+
+    def test_forces_final_response_after_post_verification_tool_churn(self) -> None:
+        self.model_client.chat.side_effect = [
+            model_response(
+                tool_calls=[
+                    tool_call(call_id="call-edit", name="edit_file")
+                ]
+            ),
+            model_response(
+                tool_calls=[
+                    tool_call(call_id="call-test", name="run_command")
+                ]
+            ),
+            model_response(tool_calls=[tool_call(call_id="call-read-1")]),
+            model_response(tool_calls=[tool_call(call_id="call-read-2")]),
+            model_response(content="Done."),
+        ]
+        self.tool_executor.side_effect = [
+            {"success": True, "content": "updated"},
+            {"success": True, "content": "passed"},
+            {"success": True, "content": "first review"},
+            {"success": True, "content": "second review"},
+        ]
+        tools = [{"type": "function", "function": {"name": "read_file"}}]
+        loop = AgentLoop(
+            self.model_client,
+            tools=tools,
+            tool_executor=self.tool_executor,
+            max_steps=8,
+        )
+
+        result = loop.run("Update app.py")
+
+        self.assertEqual(result, "Done.")
+        self.assertEqual(loop.state.completion_reminders, 2)
+        self.assertIsNone(self.model_client.chat.call_args_list[-1].args[1])
+
     def test_failed_command_does_not_verify_file_change(self) -> None:
         self.model_client.chat.side_effect = [
             model_response(

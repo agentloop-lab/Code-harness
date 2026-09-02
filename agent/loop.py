@@ -33,6 +33,17 @@ NO_PROGRESS_WARNING = (
     "again. Do not repeat it. Inspect different evidence, change the arguments, "
     "or use another approach."
 )
+VERIFICATION_COMPLETED_REMINDER = (
+    "The latest workspace changes are verified. If the requested work "
+    "is complete, return the final answer now. Do not reread files or run "
+    "extra checks only to reconfirm completed work."
+)
+FINAL_RESPONSE_REMINDER = (
+    "The latest workspace changes were verified and two additional tool "
+    "rounds found no need for another edit. Stop using tools and return a "
+    "concise final answer describing the result and verification."
+)
+POST_VERIFICATION_TOOL_ROUND_LIMIT = 2
 
 
 class AgentLoopError(RuntimeError):
@@ -62,6 +73,7 @@ class AgentState:
     verification_reminders: int = 0
     no_progress_warnings: int = 0
     repeated_observations: int = 0
+    completion_reminders: int = 0
 
 
 class AgentLoop:
@@ -101,6 +113,9 @@ class AgentLoop:
         self._last_observation: str | None = None
         self._last_warned_observation: str | None = None
         self._repeated_observations = 0
+        self._post_verification_tool_rounds: int | None = None
+        self._verification_just_succeeded = False
+        self._force_final_response = False
         self.state: AgentState | None = None
 
     def run(self, task: str, system_prompt: str | None = None) -> str:
@@ -110,6 +125,9 @@ class AgentLoop:
         self._last_observation = None
         self._last_warned_observation = None
         self._repeated_observations = 0
+        self._post_verification_tool_rounds = None
+        self._verification_just_succeeded = False
+        self._force_final_response = False
 
         self.state = AgentState(
             messages=self.messages,
@@ -133,8 +151,11 @@ class AgentLoop:
                 request_messages, was_compacted = context
                 if was_compacted:
                     self.state.messages[:] = request_messages
+                available_tools = (
+                    None if self._force_final_response else self.tools
+                )
                 response = self.model_client.chat(
-                    request_messages, self.tools
+                    request_messages, available_tools
                 )
                 message = self._response_message(response)
                 assistant_message, tool_calls = self._assistant_message(message)
@@ -161,6 +182,7 @@ class AgentLoop:
                     tool_message = self._execute_tool(tool_call)
                     self.state.messages.append(tool_message)
                     self._observe_tool_result(tool_call, tool_message)
+                self._handle_completion_progress()
                 self._handle_no_progress()
             except AgentNoProgressError:
                 self.state.task_status = "no_progress"
@@ -279,10 +301,41 @@ class AgentLoop:
             self.workspace_dirty = True
             self.verification_required = True
             self.last_verification_successful = False
+            self._post_verification_tool_rounds = None
+            self._verification_just_succeeded = False
+            self._force_final_response = False
         elif name == VERIFICATION_TOOL_NAME and self.verification_required:
             self.verification_required = False
             self.last_verification_successful = True
+            self._post_verification_tool_rounds = 0
+            self._verification_just_succeeded = True
         self._sync_verification_state()
+
+    def _handle_completion_progress(self) -> None:
+        if self.state is None:
+            return
+        if self._verification_just_succeeded:
+            self._verification_just_succeeded = False
+            self.state.completion_reminders += 1
+            self.state.messages.append(
+                {"role": "user", "content": VERIFICATION_COMPLETED_REMINDER}
+            )
+            return
+        if self._post_verification_tool_rounds is None:
+            return
+
+        self._post_verification_tool_rounds += 1
+        if (
+            self._post_verification_tool_rounds
+            < POST_VERIFICATION_TOOL_ROUND_LIMIT
+        ):
+            return
+
+        self._force_final_response = True
+        self.state.completion_reminders += 1
+        self.state.messages.append(
+            {"role": "user", "content": FINAL_RESPONSE_REMINDER}
+        )
 
     def _sync_verification_state(self) -> None:
         if self.state is None:

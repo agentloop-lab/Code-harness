@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 from collections.abc import Mapping
 from pathlib import Path
@@ -132,7 +133,14 @@ class ToolExecutor:
             else:
                 self._file_versions.pop(target, None)
         elif name == "edit_file" and target is not None:
-            if result.success or result.error_type == "StaleFile":
+            if result.success:
+                try:
+                    self._file_versions[target] = hashlib.sha256(
+                        target.read_bytes()
+                    ).hexdigest()
+                except OSError:
+                    self._file_versions.pop(target, None)
+            elif result.error_type == "StaleFile":
                 self._file_versions.pop(target, None)
         return result.to_dict()
 

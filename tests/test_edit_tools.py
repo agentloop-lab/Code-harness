@@ -158,7 +158,7 @@ class EditFileTests(unittest.TestCase):
         self.assertEqual(result["error_type"], "StaleFile")
         self.assertEqual(target.read_text(encoding="utf-8"), "changed outside")
 
-    def test_executor_requires_new_read_after_successful_edit(self) -> None:
+    def test_executor_allows_consecutive_edits_after_one_read(self) -> None:
         target = self.workspace / "file.txt"
         target.write_text("one", encoding="utf-8")
         executor = ToolExecutor(self.workspace)
@@ -174,9 +174,29 @@ class EditFileTests(unittest.TestCase):
         )
 
         self.assertTrue(first_result["success"])
+        self.assertTrue(second_result["success"])
+        self.assertEqual(target.read_text(encoding="utf-8"), "three")
+
+    def test_executor_detects_external_change_after_successful_edit(self) -> None:
+        target = self.workspace / "file.txt"
+        target.write_text("one", encoding="utf-8")
+        executor = ToolExecutor(self.workspace)
+        executor("read_file", {"path": "file.txt"})
+        first_result = executor(
+            "edit_file",
+            {"path": "file.txt", "old_text": "one", "new_text": "two"},
+        )
+        target.write_text("changed outside", encoding="utf-8")
+
+        second_result = executor(
+            "edit_file",
+            {"path": "file.txt", "old_text": "two", "new_text": "three"},
+        )
+
+        self.assertTrue(first_result["success"])
         self.assertFalse(second_result["success"])
-        self.assertEqual(second_result["error_type"], "ReadRequired")
-        self.assertEqual(target.read_text(encoding="utf-8"), "two")
+        self.assertEqual(second_result["error_type"], "StaleFile")
+        self.assertEqual(target.read_text(encoding="utf-8"), "changed outside")
 
 
 if __name__ == "__main__":
