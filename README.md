@@ -18,6 +18,30 @@ A lightweight coding agent harness for autonomous software engineering tasks.
 - No-progress warnings and early termination for repeated tool calls
 - Compact CLI output with status and diff views
 
+## Architecture
+
+![Code Harness runtime architecture](Model.png)
+
+A task enters through the CLI, which manages interactive features such as
+sessions, project memory, Skills, file references, and Plan/Act Mode. The
+Context Manager prepares a controlled-size conversation for the Model Client.
+The Agent Loop then turns model decisions into tool calls, while the Tool
+Executor enforces workspace isolation and the read-only boundary of Plan Mode.
+
+## Core Runtime Mechanisms
+
+- **Context management:** Oversized tool results are stored locally with only a
+  preview kept in context. Older tool outputs are pruned before each model
+  request, and older conversation history is summarized if the remaining
+  context still exceeds the budget. The current task is preserved.
+- **Safe Edit:** Reading a file records its version. If the file changes before
+  an edit, the stale edit is rejected and the agent must read the latest version
+  before continuing.
+- **Verification and no-progress safeguards:** After changing files, the agent
+  must run an appropriate verification command or explicitly explain why none
+  is available. Repeated identical tool calls first trigger a warning and then
+  stop the run.
+
 ## Setup
 
 Code Harness requires Python 3.10 or later.
@@ -105,28 +129,16 @@ Plan> /act
 
 ## Skills
 
-A Skill is a `SKILL.md` file containing reusable instructions for a specific type of task. Bundled Skills live in `skills/`. Local Skills that should not be committed can be placed in `.agent/skills/`:
+A Skill is a `SKILL.md` file containing reusable instructions for a specific
+type of task. Bundled Skills live in `skills/`, while uncommitted local Skills
+can be placed in `.agent/skills/`. Only the explicitly selected Skill is added
+to the agent instructions, and it cannot bypass workspace or tool restrictions.
 
 ```text
 skills/
 └── python-testing/
     └── SKILL.md
 ```
-
-Each `SKILL.md` starts with a small metadata block. Its `name` must match the directory name:
-
-```markdown
----
-name: python-testing
-description: Diagnose and fix Python test failures with focused verification.
----
-
-# Python Testing
-
-- Run the smallest relevant test before changing code.
-```
-
-List and activate Skills from the CLI:
 
 ```text
 Task> /skills
@@ -135,7 +147,7 @@ Task> Diagnose the failing Python tests
 Task> /skill off
 ```
 
-Only the selected Skill is added to the agent instructions. The selection lasts for the current CLI process and does not bypass workspace or tool safety checks.
+The selection lasts for the current CLI process.
 
 ## Tests
 

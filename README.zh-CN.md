@@ -18,6 +18,25 @@
 - 重复工具调用的无进展提醒和提前终止
 - 紧凑的工具输出、文件状态和代码差异展示
 
+## 项目架构
+
+![Code Harness 运行架构](Model.png)
+
+用户任务首先进入 CLI。CLI 负责会话、项目记忆、Skills、文件引用和
+Plan/Act Mode 等交互功能；Context Manager 为模型整理长度可控的上下文；
+Agent Loop 根据模型的判断发起工具调用；Tool Executor 则负责工作区隔离，
+并在 Plan Mode 下限制写入和命令执行。
+
+## 核心运行机制
+
+- **上下文管理：** 过长的工具结果会完整保存到本地，上下文中只留下预览；
+  每次请求模型前会精简较旧的工具输出，如果仍然超过预算，再把早期对话整理成
+  摘要，同时保留当前任务。
+- **Safe Edit：** 读取文件时记录版本。如果编辑前文件已经发生变化，系统会拒绝
+  基于旧版本的修改，要求 Agent 重新读取后再继续。
+- **验证与无进展保护：** 文件改动后，Agent 必须运行合适的验证命令，或者明确
+  说明为什么无法验证。连续重复完全相同的工具调用时，系统会先提醒，再停止任务。
+
 ## 安装
 
 Code Harness 需要 Python 3.10 或更高版本。
@@ -93,28 +112,15 @@ Plan> /act
 
 ## Skills
 
-Skill 是一个为特定任务提供可复用说明的 `SKILL.md` 文件。随项目提交的 Skill 放在 `skills/`，不希望提交到仓库的本地 Skill 可以放在 `.agent/skills/`：
+Skill 是一个为特定任务提供可复用说明的 `SKILL.md` 文件。随项目提交的 Skill
+放在 `skills/`，不希望提交到仓库的本地 Skill 可以放在 `.agent/skills/`。
+只有用户明确选择的 Skill 才会加入 Agent 指令，并且不能绕过工作区或工具限制。
 
 ```text
 skills/
 └── python-testing/
     └── SKILL.md
 ```
-
-每个 `SKILL.md` 都以简短的元数据开头，其中 `name` 必须和目录名一致：
-
-```markdown
----
-name: python-testing
-description: Diagnose and fix Python test failures with focused verification.
----
-
-# Python Testing
-
-- Run the smallest relevant test before changing code.
-```
-
-在 CLI 中查看和启用 Skill：
 
 ```text
 Task> /skills
@@ -123,7 +129,7 @@ Task> 检查并修复当前失败的 Python 测试
 Task> /skill off
 ```
 
-只有当前选中的 Skill 会加入 Agent 指令。选择结果只在本次 CLI 进程中生效，也不能绕过工作区和工具安全限制。
+选择结果只在本次 CLI 进程中生效。
 
 ## 测试
 
