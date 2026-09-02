@@ -369,8 +369,13 @@ def run_cli(
                 if not pending_plan:
                     print("No plan to execute. Use /plan <task> first.", file=output)
                     continue
-                planning_loop = None
                 workspace_tracker.start()
+                messages_before_act = list(loop.messages)
+                turns_before_act = session.total_turns
+                print(
+                    "Executing plan. Press Ctrl+C to cancel this turn.",
+                    file=output,
+                )
                 result = _run_turn(
                     "Execute the approved plan below. Inspect files again if "
                     f"needed, make the changes, and verify them.\n\n{pending_plan}",
@@ -384,7 +389,29 @@ def run_cli(
                     ),
                 )
                 if result == 0:
+                    planning_loop = None
                     pending_plan = None
+                else:
+                    state = loop.state
+                    used_tools = state is not None and bool(state.tool_calls)
+                    if used_tools:
+                        planning_loop = None
+                        print(
+                            "Execution stopped after tool calls. Plan mode is "
+                            "closed; inspect /status and tell the agent to "
+                            "continue from the current workspace state.",
+                            file=output,
+                        )
+                    else:
+                        loop.messages[:] = messages_before_act
+                        session.messages = loop.messages
+                        session.total_turns = turns_before_act
+                        session_store.save(session)
+                        print(
+                            "Plan preserved. Use /act to retry, revise the "
+                            "plan, or /cancel.",
+                            file=output,
+                        )
                 continue
             if task.casefold() == "/remember" or task.casefold().startswith(
                 "/remember "
@@ -651,6 +678,12 @@ def _run_turn(
 
     try:
         answer = loop.run(task, system_prompt=system_prompt)
+    except KeyboardInterrupt:
+        session.messages = loop.messages
+        session.total_turns += 1
+        session_store.save(session)
+        print("\nAgent request cancelled.", file=output)
+        return 130
     except AgentLoopError as exc:
         session.messages = loop.messages
         session.total_turns += 1

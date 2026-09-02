@@ -375,6 +375,155 @@ class CommandLineTests(unittest.TestCase):
     @patch("cli.app.AgentLoop")
     @patch("cli.app.ModelClient")
     @patch("cli.app.ToolExecutor")
+    def test_act_timeout_before_tools_preserves_plan_for_retry(
+        self,
+        executor_class: Mock,
+        model_class: Mock,
+        loop_class: Mock,
+    ) -> None:
+        executor_class.return_value.definitions = []
+        model_class.return_value.config.model_name = "test-model"
+        normal_loop = Mock(messages=[])
+        normal_loop.state = Mock(tool_calls=[])
+        normal_loop.run.side_effect = [
+            AgentLoopError("Model request timed out."),
+            "Implemented.",
+        ]
+        planning_loop = Mock(messages=[])
+
+        def return_plan(*args: object, **kwargs: object) -> str:
+            planning_loop.messages.append(
+                {"role": "assistant", "content": "1. Build the board"}
+            )
+            return "1. Build the board"
+
+        planning_loop.run.side_effect = return_plan
+        loop_class.side_effect = [normal_loop, planning_loop]
+        inputs = iter(["/plan build a board", "/act", "/act", "/exit"])
+        prompts: list[str] = []
+
+        def read_input(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(inputs)
+
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with patch(
+                "cli.app.DEFAULT_SESSION_DIRECTORY",
+                Path(temporary_directory) / "sessions",
+            ):
+                exit_code = main.run_cli(
+                    ["--workspace", temporary_directory],
+                    input_fn=read_input,
+                    output=output,
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(normal_loop.run.call_count, 2)
+        self.assertEqual(prompts, ["Task> ", "Plan> ", "Plan> ", "Task> "])
+        self.assertIn("Plan preserved", output.getvalue())
+        self.assertIn("Agent>\nImplemented.", output.getvalue())
+
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
+    def test_ctrl_c_during_act_preserves_plan(
+        self,
+        executor_class: Mock,
+        model_class: Mock,
+        loop_class: Mock,
+    ) -> None:
+        executor_class.return_value.definitions = []
+        model_class.return_value.config.model_name = "test-model"
+        normal_loop = Mock(messages=[])
+        normal_loop.state = Mock(tool_calls=[])
+        normal_loop.run.side_effect = KeyboardInterrupt
+        planning_loop = Mock(messages=[])
+
+        def return_plan(*args: object, **kwargs: object) -> str:
+            planning_loop.messages.append(
+                {"role": "assistant", "content": "1. Build the board"}
+            )
+            return "1. Build the board"
+
+        planning_loop.run.side_effect = return_plan
+        loop_class.side_effect = [normal_loop, planning_loop]
+        inputs = iter(["/plan build a board", "/act", "/cancel", "/exit"])
+        prompts: list[str] = []
+
+        def read_input(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(inputs)
+
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with patch(
+                "cli.app.DEFAULT_SESSION_DIRECTORY",
+                Path(temporary_directory) / "sessions",
+            ):
+                exit_code = main.run_cli(
+                    ["--workspace", temporary_directory],
+                    input_fn=read_input,
+                    output=output,
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(prompts, ["Task> ", "Plan> ", "Plan> ", "Task> "])
+        self.assertIn("Agent request cancelled", output.getvalue())
+        self.assertIn("Plan preserved", output.getvalue())
+        self.assertIn("Plan cancelled.", output.getvalue())
+
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
+    def test_act_failure_after_tool_calls_closes_plan_mode(
+        self,
+        executor_class: Mock,
+        model_class: Mock,
+        loop_class: Mock,
+    ) -> None:
+        executor_class.return_value.definitions = []
+        model_class.return_value.config.model_name = "test-model"
+        normal_loop = Mock(messages=[])
+        normal_loop.state = Mock(tool_calls=[{"function": {"name": "write_file"}}])
+        normal_loop.run.side_effect = AgentLoopError("Model request timed out.")
+        planning_loop = Mock(messages=[])
+
+        def return_plan(*args: object, **kwargs: object) -> str:
+            planning_loop.messages.append(
+                {"role": "assistant", "content": "1. Build the board"}
+            )
+            return "1. Build the board"
+
+        planning_loop.run.side_effect = return_plan
+        loop_class.side_effect = [normal_loop, planning_loop]
+        inputs = iter(["/plan build a board", "/act", "/exit"])
+        prompts: list[str] = []
+
+        def read_input(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(inputs)
+
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with patch(
+                "cli.app.DEFAULT_SESSION_DIRECTORY",
+                Path(temporary_directory) / "sessions",
+            ):
+                exit_code = main.run_cli(
+                    ["--workspace", temporary_directory],
+                    input_fn=read_input,
+                    output=output,
+                )
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(prompts, ["Task> ", "Plan> ", "Task> "])
+        self.assertIn("Execution stopped after tool calls", output.getvalue())
+        self.assertNotIn("Plan preserved", output.getvalue())
+
+    @patch("cli.app.AgentLoop")
+    @patch("cli.app.ModelClient")
+    @patch("cli.app.ToolExecutor")
     def test_cancel_leaves_plan_mode_without_executing(
         self,
         executor_class: Mock,
